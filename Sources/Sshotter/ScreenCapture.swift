@@ -1,115 +1,208 @@
 import AppKit
-import Combine
 import ScreenCaptureKit
 
 enum ScreenCapture {
     static func captureDisplay(id displayID: CGDirectDisplayID) async throws -> CGImage {
-        let content = try await SCShareableContent.excludingDesktopWindows(
-            false,
-            onScreenWindowsOnly: true
-        )
+        let content = try await shareableContent()
         guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
             throw CaptureError.noDisplay
         }
-
-        let filter = SCContentFilter(display: display, excludingWindows: [])
-        let configuration = SCStreamConfiguration()
-        let pixelScale = CGFloat(filter.pointPixelScale)
-        configuration.width = Int(CGFloat(display.width) * pixelScale)
-        configuration.height = Int(CGFloat(display.height) * pixelScale)
-        configuration.showsCursor = false
-        return try await SCScreenshotManager.captureImage(
-            contentFilter: filter,
-            configuration: configuration
-        )
+        return try await capture(display: display, in: content).image
     }
 
-    static func captureRegion(in rect: CGRect) async throws -> CGImage {
-        if #available(macOS 15.2, *) {
-            return try await SCScreenshotManager.captureImage(in: rect)
-        }
-
-        let content = try await SCShareableContent.excludingDesktopWindows(
-            false,
-            onScreenWindowsOnly: true
-        )
+    static func captureRegion(in rect: CGRect, excludingWindowIDs: [CGWindowID] = []) async throws -> CGImage {
+        let content = try await shareableContent()
         let center = CGPoint(x: rect.midX, y: rect.midY)
         guard let display = content.displays.first(where: { $0.frame.contains(center) }) else {
             throw CaptureError.noDisplay
         }
-        let filter = SCContentFilter(display: display, excludingWindows: [])
-        let configuration = SCStreamConfiguration()
-        let scale = CGFloat(filter.pointPixelScale)
-        configuration.width = Int(CGFloat(display.width) * scale)
-        configuration.height = Int(CGFloat(display.height) * scale)
-        let fullImage = try await SCScreenshotManager.captureImage(
-            contentFilter: filter,
-            configuration: configuration
+
+        let (fullImage, scale) = try await capture(
+            display: display,
+            in: content,
+            excludingWindowIDs: excludingWindowIDs
         )
         let localRect = CGRect(
             x: (rect.minX - display.frame.minX) * scale,
             y: (rect.minY - display.frame.minY) * scale,
             width: rect.width * scale,
             height: rect.height * scale
-        ).integral.intersection(CGRect(x: 0, y: 0, width: fullImage.width, height: fullImage.height))
-        guard let crop = fullImage.cropping(to: localRect) else {
+        )
+        .integral
+        .intersection(CGRect(x: 0, y: 0, width: fullImage.width, height: fullImage.height))
+
+        guard !localRect.isNull,
+              localRect.width >= 1,
+              localRect.height >= 1,
+              let crop = fullImage.cropping(to: localRect) else {
             throw CaptureError.couldNotCrop
         }
         return crop
     }
+
+    private static func shareableContent() async throws -> SCShareableContent {
+        try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+    }
+
+    private static func capture(
+        display: SCDisplay,
+        in content: SCShareableContent,
+        excludingWindowIDs: [CGWindowID] = []
+    ) async throws -> (image: CGImage, scale: CGFloat) {
+        let filter = contentFilter(
+            for: display,
+            in: content,
+            excludingWindowIDs: excludingWindowIDs
+        )
+        let scale = CGFloat(filter.pointPixelScale)
+
+        let configuration = SCStreamConfiguration()
+        configuration.width = Int(CGFloat(display.width) * scale)
+        configuration.height = Int(CGFloat(display.height) * scale)
+        configuration.showsCursor = false
+
+        let image = try await SCScreenshotManager.captureImage(
+            contentFilter: filter,
+            configuration: configuration
+        )
+        return (image, scale)
+    }
+
+    private static func contentFilter(
+        for display: SCDisplay,
+        in content: SCShareableContent,
+        excludingWindowIDs: [CGWindowID]
+    ) -> SCContentFilter {
+        // Exclude our own windows so the overlay (or the editor) never ends up
+        // in the screenshot, regardless of how quickly the window disappears.
+        let ownProcessID = ProcessInfo.processInfo.processIdentifier
+        let ownApplication = content.applications.first { $0.processID == ownProcessID }
+        let ownWindows = content.windows.filter {
+            excludingWindowIDs.contains(CGWindowID($0.windowID))
+        }
+        return SCContentFilter(
+            display: display,
+            excludingApplications: ownApplication.map { [$0] } ?? [],
+            exceptingWindows: ownWindows
+        )
+    }
 }
 
 @MainActor
-final class CaptureModel: ObservableObject {
+final class CaptureModel {
     static let shared = CaptureModel()
 
-    @Published private(set) var errorMessage: String?
     private var activeOverlay: RegionCaptureWindow?
     private var editorWindow: AnnotationEditorWindow?
+    private var isCapturing = false
 
     func beginRegionCapture() {
-        errorMessage = nil
-        Task {
-            do {
-                guard let screen = NSScreen.main,
-                      let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
-                    throw CaptureError.noDisplay
-                }
-                let displayID = CGDirectDisplayID(screenNumber.uint32Value)
-                let image = try await ScreenCapture.captureDisplay(id: displayID)
-                let onComplete: (CGRect) -> Void = { [weak self] rect in
-                    Task { @MainActor in
-                        do {
-                            let crop = try await ScreenCapture.captureRegion(in: rect)
-                            self?.showEditor(with: crop)
-                        } catch {
-                            self?.showError(error)
-                        }
-                    }
-                }
+        guard !isCapturing else { return }
 
-                if let activeOverlay {
-                    activeOverlay.prepare(screen: screen, image: image, onComplete: onComplete)
-                } else {
-                    activeOverlay = RegionCaptureWindow(screen: screen, image: image, onComplete: onComplete)
-                }
-                activeOverlay?.show()
+        guard let screen = screenUnderPointer(),
+              let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            showError(CaptureError.noDisplay)
+            return
+        }
+
+        isCapturing = true
+        let displayID = CGDirectDisplayID(screenNumber.uint32Value)
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let image = try await ScreenCapture.captureDisplay(id: displayID)
+                self.presentOverlay(on: screen, image: image)
             } catch {
-                showError(error)
+                self.isCapturing = false
+                self.showError(error)
             }
         }
     }
 
+    private func screenUnderPointer() -> NSScreen? {
+        let pointer = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(pointer) }
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+    }
+
+    private func presentOverlay(on screen: NSScreen, image: CGImage) {
+        let overlay = RegionCaptureWindow(
+            screen: screen,
+            image: image,
+            onComplete: { [weak self] rect in
+                Task { @MainActor in self?.completeSelection(rect) }
+            },
+            onCancel: { [weak self] in
+                Task { @MainActor in self?.cancelCapture() }
+            }
+        )
+        activeOverlay = overlay
+        overlay.show()
+    }
+
+    private func completeSelection(_ rect: CGRect) {
+        let excludedWindowIDs = activeOverlay.map { [CGWindowID($0.windowNumber)] } ?? []
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let image = try await ScreenCapture.captureRegion(
+                    in: rect,
+                    excludingWindowIDs: excludedWindowIDs
+                )
+                self.dismissOverlay()
+                self.isCapturing = false
+                self.showEditor(with: image)
+            } catch {
+                self.dismissOverlay()
+                self.isCapturing = false
+                self.showError(error)
+            }
+        }
+    }
+
+    private func cancelCapture() {
+        dismissOverlay()
+        isCapturing = false
+    }
+
+    private func dismissOverlay() {
+        activeOverlay?.dismiss()
+        activeOverlay = nil
+    }
+
     private func showEditor(with image: CGImage) {
+        // The app is a menu-bar agent while idle, but the editor behaves like a
+        // regular app: it gets its own menu bar and a Dock presence.
+        NSApp.setActivationPolicy(.regular)
+
         if let editorWindow {
             editorWindow.present(image: image)
         } else {
-            let editor = AnnotationEditorWindow { [weak self] image in
-                self?.copyToClipboard(image)
-            }
+            let editor = AnnotationEditorWindow(
+                onCopy: { [weak self] image in
+                    self?.copyToClipboard(image)
+                },
+                onSave: { data in
+                    try ScreenshotStore.shared.save(pngData: data)
+                },
+                onClose: { [weak self] in
+                    self?.editorDidClose()
+                }
+            )
             editorWindow = editor
             editor.present(image: image)
         }
+    }
+
+    private func editorDidClose() {
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    func closeEditor() {
+        editorWindow?.close()
     }
 
     private func copyToClipboard(_ image: NSImage) {
@@ -124,7 +217,6 @@ final class CaptureModel: ObservableObject {
     }
 
     private func showError(_ error: Error) {
-        errorMessage = error.localizedDescription
         let alert = NSAlert()
         alert.messageText = "Couldn’t capture the screen"
         alert.informativeText = error.localizedDescription + "\n\nCheck System Settings → Privacy & Security → Screen & System Audio Recording, then try again."
@@ -137,13 +229,11 @@ final class CaptureModel: ObservableObject {
 
 private enum CaptureError: LocalizedError {
     case noDisplay
-    case couldNotEncode
     case couldNotCrop
 
     var errorDescription: String? {
         switch self {
         case .noDisplay: "No display was available to capture."
-        case .couldNotEncode: "The selected area couldn’t be saved as a PNG."
         case .couldNotCrop: "The selected area was outside the captured display."
         }
     }
@@ -151,14 +241,22 @@ private enum CaptureError: LocalizedError {
 
 @MainActor
 private final class RegionCaptureWindow: NSWindow {
-    private let selectionView: RegionSelectionView
+    private var selectionView: RegionSelectionView?
 
     init(
         screen: NSScreen,
         image: CGImage,
-        onComplete: @escaping (CGRect) -> Void
+        onComplete: @escaping (CGRect) -> Void,
+        onCancel: @escaping () -> Void
     ) {
-        selectionView = RegionSelectionView(image: image, size: screen.frame.size, onComplete: onComplete)
+        let view = RegionSelectionView(
+            image: image,
+            size: screen.frame.size,
+            onComplete: onComplete,
+            onCancel: onCancel
+        )
+        selectionView = view
+
         super.init(
             contentRect: screen.frame,
             styleMask: .borderless,
@@ -173,20 +271,23 @@ private final class RegionCaptureWindow: NSWindow {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         ignoresMouseEvents = false
         acceptsMouseMovedEvents = true
-        contentView = selectionView
-    }
-
-    func prepare(screen: NSScreen, image: CGImage, onComplete: @escaping (CGRect) -> Void) {
-        setFrame(screen.frame, display: false)
-        selectionView.configure(image: image, size: screen.frame.size, onComplete: onComplete)
+        contentView = view
     }
 
     func show() {
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         makeKeyAndOrderFront(nil)
         orderFrontRegardless()
-        invalidateCursorRects(for: selectionView)
+        if let selectionView {
+            invalidateCursorRects(for: selectionView)
+        }
         NSCursor.crosshair.set()
+    }
+
+    func dismiss() {
+        orderOut(nil)
+        contentView = nil
+        selectionView = nil
     }
 
     override var canBecomeKey: Bool { true }
@@ -195,16 +296,22 @@ private final class RegionCaptureWindow: NSWindow {
 
 @MainActor
 private final class RegionSelectionView: NSView {
-    private var image: CGImage
-    private var screenImage: NSImage
-    private var onComplete: (CGRect) -> Void
+    private let screenImage: NSImage
+    private let onComplete: (CGRect) -> Void
+    private let onCancel: () -> Void
     private var startPoint: CGPoint?
     private var currentPoint: CGPoint?
+    private var hasFinished = false
 
-    init(image: CGImage, size: NSSize, onComplete: @escaping (CGRect) -> Void) {
-        self.image = image
+    init(
+        image: CGImage,
+        size: NSSize,
+        onComplete: @escaping (CGRect) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
         self.screenImage = NSImage(cgImage: image, size: size)
         self.onComplete = onComplete
+        self.onCancel = onCancel
         super.init(frame: .zero)
     }
 
@@ -245,15 +352,6 @@ private final class RegionSelectionView: NSView {
         NSCursor.crosshair.set()
     }
 
-    func configure(image: CGImage, size: NSSize, onComplete: @escaping (CGRect) -> Void) {
-        self.image = image
-        screenImage = NSImage(cgImage: image, size: size)
-        self.onComplete = onComplete
-        startPoint = nil
-        currentPoint = nil
-        needsDisplay = true
-    }
-
     override func draw(_ dirtyRect: NSRect) {
         screenImage.draw(in: bounds)
 
@@ -273,6 +371,7 @@ private final class RegionSelectionView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard !hasFinished else { return }
         let point = convert(event.locationInWindow, from: nil)
         startPoint = point
         currentPoint = point
@@ -280,45 +379,75 @@ private final class RegionSelectionView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        guard !hasFinished else { return }
         currentPoint = convert(event.locationInWindow, from: nil)
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard !hasFinished else { return }
         currentPoint = convert(event.locationInWindow, from: nil)
-        guard let rect = selectionRect, rect.width >= 2, rect.height >= 2 else {
-            window?.orderOut(nil)
+        guard let selection = selectionRect,
+              selection.width >= 2,
+              selection.height >= 2,
+              let screenRect = screenRect(for: selection) else {
+            cancel()
             return
         }
 
-        let displayID = (window?.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
-            .map { CGDirectDisplayID($0.uint32Value) } ?? CGMainDisplayID()
-        let displayBounds = CGDisplayBounds(displayID)
-        let screenRect = CGRect(
-            x: displayBounds.minX + rect.minX,
-            y: displayBounds.minY + rect.minY,
-            width: rect.width,
-            height: rect.height
-        )
-        window?.orderOut(nil)
+        // Keep the overlay on screen while the capture runs so the app is
+        // present in ScreenCaptureKit's window list and can be excluded.
+        hasFinished = true
+        NSCursor.arrow.set()
         onComplete(screenRect)
     }
 
+    override func rightMouseDown(with event: NSEvent) {
+        cancel()
+    }
+
     override func keyDown(with event: NSEvent) {
+        guard !hasFinished else { return }
         if event.keyCode == 53 {
-            window?.orderOut(nil)
+            cancel()
         } else {
             super.keyDown(with: event)
         }
     }
 
+    private func cancel() {
+        guard !hasFinished else { return }
+        hasFinished = true
+        window?.orderOut(nil)
+        NSCursor.arrow.set()
+        onCancel()
+    }
+
+    /// Converts the selection from flipped view coordinates to Core Graphics
+    /// global display coordinates (origin at the top-left of the main display,
+    /// y increasing downward).
+    private func screenRect(for viewRect: CGRect) -> CGRect? {
+        guard let window else { return nil }
+        let primaryScreen = NSScreen.screens.first
+        let windowRect = convert(viewRect, to: nil)
+        let appKitRect = window.convertToScreen(windowRect)
+        return CGRect(
+            x: appKitRect.minX,
+            y: (primaryScreen?.frame.maxY ?? appKitRect.maxY) - appKitRect.maxY,
+            width: appKitRect.width,
+            height: appKitRect.height
+        )
+    }
+
     private var selectionRect: CGRect? {
         guard let startPoint, let currentPoint else { return nil }
-        return CGRect(
+        let rect = CGRect(
             x: min(startPoint.x, currentPoint.x),
             y: min(startPoint.y, currentPoint.y),
             width: abs(currentPoint.x - startPoint.x),
             height: abs(currentPoint.y - startPoint.y)
         )
+        let clamped = rect.intersection(bounds)
+        return clamped.isNull ? nil : clamped
     }
 }

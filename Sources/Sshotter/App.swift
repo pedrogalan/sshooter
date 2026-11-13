@@ -15,38 +15,222 @@ enum SshooterMain {
 }
 
 @MainActor
-private final class AppDelegate: NSObject, NSApplicationDelegate {
+private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private var hotKey: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
-    private var appMenu: NSMenu?
+    private var statusMenu: NSMenu?
+    private var saveFolderItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "camera", accessibilityDescription: "sshooter")
         }
 
-        let menu = NSMenu()
-        let captureItem = NSMenuItem(title: "Capture Area  ⌘⇧2", action: #selector(captureArea), keyEquivalent: "")
-        captureItem.target = self
-        menu.addItem(captureItem)
-        menu.addItem(.separator())
-        let quitItem = NSMenuItem(title: "Quit sshooter", action: #selector(quit), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-        statusItem.menu = menu
-        appMenu = menu
-
+        buildStatusMenu()
+        buildMainMenu()
+        configureApplicationIcon()
         registerHotKey()
     }
 
-    @objc private func captureArea() {
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+        true
+    }
+
+    // MARK: - Menu bar (status item)
+
+    private func buildStatusMenu() {
+        let menu = NSMenu()
+        menu.delegate = self
+
+        let captureItem = NSMenuItem(
+            title: "Capture Area  ⌘⇧2",
+            action: #selector(captureArea(_:)),
+            keyEquivalent: ""
+        )
+        captureItem.target = self
+        menu.addItem(captureItem)
+        menu.addItem(.separator())
+
+        let folderItem = NSMenuItem(
+            title: saveFolderTitle(),
+            action: #selector(chooseSaveFolder(_:)),
+            keyEquivalent: ""
+        )
+        folderItem.target = self
+        menu.addItem(folderItem)
+        saveFolderItem = folderItem
+        menu.addItem(.separator())
+
+        let quitItem = NSMenuItem(
+            title: "Quit sshooter",
+            action: #selector(quit(_:)),
+            keyEquivalent: "q"
+        )
+        quitItem.target = self
+        menu.addItem(quitItem)
+
+        statusItem.menu = menu
+        statusMenu = menu
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        saveFolderItem?.title = saveFolderTitle()
+    }
+
+    @objc private func chooseSaveFolder(_ sender: Any?) {
+        ScreenshotStore.shared.chooseSaveFolder()
+        saveFolderItem?.title = saveFolderTitle()
+    }
+
+    private func saveFolderTitle() -> String {
+        guard let folder = ScreenshotStore.shared.saveFolderURL else {
+            return "Choose Save Folder…"
+        }
+        return "Save Folder: \(folder.lastPathComponent)"
+    }
+
+    // MARK: - Main menu
+
+    /// Builds the application menu bar. It is only visible while the app runs
+    /// with the `.regular` activation policy (while the editor is open).
+    private func buildMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenuItem.submenu = appMenu
+
+        appMenu.addItem(withTitle: "About sshooter", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+
+        let folderItem = NSMenuItem(
+            title: "Choose Save Folder…",
+            action: #selector(chooseSaveFolder(_:)),
+            keyEquivalent: ""
+        )
+        folderItem.target = self
+        appMenu.addItem(folderItem)
+        appMenu.addItem(.separator())
+
+        appMenu.addItem(withTitle: "Hide sshooter", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthersItem = NSMenuItem(title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthersItem.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(hideOthersItem)
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+
+        let closeEditorItem = NSMenuItem(
+            title: "Close Editor",
+            action: #selector(closeEditor(_:)),
+            keyEquivalent: "q"
+        )
+        closeEditorItem.target = self
+        appMenu.addItem(closeEditorItem)
+        appMenu.addItem(.separator())
+        appMenu.addItem(
+            withTitle: "Quit sshooter",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: ""
+        )
+
+        mainMenu.addItem(appMenuItem)
+
+        let fileMenuItem = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
+        let fileMenu = NSMenu(title: "File")
+        fileMenuItem.submenu = fileMenu
+
+        let captureItem = NSMenuItem(
+            title: "Capture Area",
+            action: #selector(captureArea(_:)),
+            keyEquivalent: "2"
+        )
+        captureItem.keyEquivalentModifierMask = [.command, .shift]
+        captureItem.target = self
+        fileMenu.addItem(captureItem)
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(
+            withTitle: "Save Screenshot",
+            action: #selector(AnnotationEditorWindow.saveScreenshot(_:)),
+            keyEquivalent: "s"
+        )
+        fileMenu.addItem(
+            withTitle: "Close",
+            action: #selector(NSWindow.performClose(_:)),
+            keyEquivalent: "w"
+        )
+        mainMenu.addItem(fileMenuItem)
+
+        let editMenuItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        let editMenu = NSMenu(title: "Edit")
+        editMenuItem.submenu = editMenu
+        editMenu.addItem(
+            withTitle: "Copy Screenshot",
+            action: #selector(AnnotationEditorWindow.copyScreenshot(_:)),
+            keyEquivalent: "c"
+        )
+        mainMenu.addItem(editMenuItem)
+
+        let windowMenuItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
+        let windowMenu = NSMenu(title: "Window")
+        windowMenuItem.submenu = windowMenu
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+        mainMenu.addItem(windowMenuItem)
+
+        NSApp.windowsMenu = windowMenu
+        NSApp.mainMenu = mainMenu
+    }
+
+    // MARK: - Application icon
+
+    /// A generated Dock icon, shown only while the app is promoted to a regular
+    /// app (i.e. while the editor is open).
+    private func configureApplicationIcon() {
+        let size = NSSize(width: 512, height: 512)
+        let image = NSImage(size: size, flipped: false) { rect in
+            let background = NSBezierPath(
+                roundedRect: rect.insetBy(dx: 40, dy: 40),
+                xRadius: 104,
+                yRadius: 104
+            )
+            NSColor.controlAccentColor.setFill()
+            background.fill()
+
+            let configuration = NSImage.SymbolConfiguration(pointSize: 230, weight: .semibold)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
+            guard let symbol = NSImage(systemSymbolName: "camera.fill", accessibilityDescription: nil)?
+                .withSymbolConfiguration(configuration) else { return true }
+
+            let symbolSize = symbol.size
+            symbol.draw(in: NSRect(
+                x: rect.midX - symbolSize.width / 2,
+                y: rect.midY - symbolSize.height / 2,
+                width: symbolSize.width,
+                height: symbolSize.height
+            ))
+            return true
+        }
+        NSApp.applicationIconImage = image
+    }
+
+    // MARK: - Actions
+
+    @objc private func captureArea(_ sender: Any?) {
         CaptureModel.shared.beginRegionCapture()
     }
 
-    @objc private func quit() {
+    @objc private func closeEditor(_ sender: Any?) {
+        CaptureModel.shared.closeEditor()
+    }
+
+    @objc private func quit(_ sender: Any?) {
         NSApp.terminate(nil)
     }
+
+    // MARK: - Global hotkey
 
     private func registerHotKey() {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -55,7 +239,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             { _, _, userData in
                 guard let userData else { return noErr }
                 let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
-                Task { @MainActor in delegate.captureArea() }
+                Task { @MainActor in delegate.captureArea(nil) }
                 return noErr
             },
             1,
@@ -85,7 +269,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showHotKeyError(_ status: OSStatus) {
         let item = NSMenuItem(title: "Shortcut unavailable (error \(status))", action: nil, keyEquivalent: "")
         item.isEnabled = false
-        appMenu?.insertItem(item, at: 1)
+        statusMenu?.insertItem(item, at: 1)
         statusItem.button?.toolTip = "sshooter: ⌘⇧2 shortcut unavailable (error \(status))"
     }
 }

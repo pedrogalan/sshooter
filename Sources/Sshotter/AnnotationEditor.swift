@@ -2,15 +2,25 @@ import AppKit
 import CoreGraphics
 
 @MainActor
-final class AnnotationEditorWindow: NSWindow, NSToolbarDelegate {
+final class AnnotationEditorWindow: NSWindow, NSToolbarDelegate, NSWindowDelegate {
     private static let arrowToolID = NSToolbarItem.Identifier("sshooter.arrowTool")
+    private static let saveToolID = NSToolbarItem.Identifier("sshooter.saveTool")
     private static let copyToolID = NSToolbarItem.Identifier("sshooter.copyTool")
 
     private let canvas = AnnotationCanvasView()
-    private let onCopy: (NSImage) -> Void
+    private let onCopy: @MainActor (NSImage) -> Void
+    private let onSave: @MainActor (Data) throws -> URL?
+    private let onClose: @MainActor () -> Void
+    private var hasPositionedWindow = false
 
-    init(onCopy: @escaping (NSImage) -> Void) {
+    init(
+        onCopy: @escaping @MainActor (NSImage) -> Void,
+        onSave: @escaping @MainActor (Data) throws -> URL?,
+        onClose: @escaping @MainActor () -> Void
+    ) {
         self.onCopy = onCopy
+        self.onSave = onSave
+        self.onClose = onClose
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -22,6 +32,7 @@ final class AnnotationEditorWindow: NSWindow, NSToolbarDelegate {
         minSize = NSSize(width: 560, height: 380)
         isReleasedWhenClosed = false
         acceptsMouseMovedEvents = true
+        delegate = self
         canvas.autoresizingMask = [.width, .height]
         contentView = canvas
 
@@ -34,18 +45,25 @@ final class AnnotationEditorWindow: NSWindow, NSToolbarDelegate {
 
     func present(image: CGImage) {
         canvas.setImage(image)
-        center()
-        NSApp.activate(ignoringOtherApps: true)
+        title = "Screenshot"
+
+        let isOnScreen = NSScreen.screens.contains { $0.visibleFrame.intersects(frame) }
+        if !hasPositionedWindow || !isOnScreen {
+            center()
+            hasPositionedWindow = true
+        }
+
+        NSApp.activate()
         makeKeyAndOrderFront(nil)
         makeFirstResponder(canvas)
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [Self.arrowToolID, .flexibleSpace, Self.copyToolID]
+        [Self.arrowToolID, .flexibleSpace, Self.saveToolID, Self.copyToolID]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [Self.arrowToolID, .flexibleSpace, Self.copyToolID]
+        [Self.arrowToolID, .flexibleSpace, Self.saveToolID, Self.copyToolID]
     }
 
     func toolbar(
@@ -54,44 +72,96 @@ final class AnnotationEditorWindow: NSWindow, NSToolbarDelegate {
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
         let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-        if itemIdentifier == Self.arrowToolID {
+        switch itemIdentifier {
+        case Self.arrowToolID:
             item.label = "Arrow"
             item.paletteLabel = "Arrow"
             item.toolTip = "Click a start point, move, then click an end point."
             item.image = NSImage(systemSymbolName: "arrow.up.right", accessibilityDescription: "Arrow tool")
             item.target = self
             item.action = #selector(selectArrowTool)
-            return item
-        }
-        if itemIdentifier == Self.copyToolID {
+        case Self.saveToolID:
+            item.label = "Save"
+            item.paletteLabel = "Save Screenshot"
+            item.toolTip = "Save a PNG to your chosen folder (⌘S)."
+            item.image = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "Save")
+            item.target = self
+            item.action = #selector(saveScreenshot(_:))
+        case Self.copyToolID:
             item.label = "Copy"
             item.paletteLabel = "Copy Screenshot"
             item.toolTip = "Copy the annotated image and close this window (⌘C)."
             item.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy")
             item.target = self
-            item.action = #selector(copyImage)
-            return item
+            item.action = #selector(copyScreenshot(_:))
+        default:
+            return nil
         }
-        return nil
+        return item
     }
 
     @objc private func selectArrowTool() {
         canvas.selectArrowTool()
     }
 
-    @objc private func copyImage() {
+    @objc func copyScreenshot(_ sender: Any?) {
         guard let image = canvas.imageWithAnnotations() else { return }
         onCopy(image)
-        orderOut(nil)
+        close()
+    }
+
+    @objc func saveScreenshot(_ sender: Any?) {
+        guard let data = canvas.pngDataWithAnnotations() else {
+            presentSaveError(ScreenshotStoreError.encodingFailed)
+            return
+        }
+
+        do {
+            guard let url = try onSave(data) else { return }
+            title = "Saved: \(url.lastPathComponent)"
+        } catch {
+            presentSaveError(error)
+        }
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if modifiers.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "c" {
-            copyImage()
+        if event.keyCode == 53 {
+            if canvas.cancelCurrentAction() { return true }
+            close()
             return true
         }
+
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if modifiers == .command, let key = event.charactersIgnoringModifiers?.lowercased() {
+            if key == "c" {
+                copyScreenshot(nil)
+                return true
+            }
+            if key == "s" {
+                saveScreenshot(nil)
+                return true
+            }
+        }
         return super.performKeyEquivalent(with: event)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        canvas.clear()
+        title = "Screenshot"
+        onClose()
+    }
+
+    private func presentSaveError(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn’t save the screenshot"
+        alert.informativeText = error.localizedDescription
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        if isVisible {
+            alert.beginSheetModal(for: self)
+        } else {
+            alert.runModal()
+        }
     }
 }
 
@@ -100,6 +170,21 @@ private final class AnnotationCanvasView: NSView {
     private struct Arrow {
         let start: CGPoint
         let end: CGPoint
+    }
+
+    private enum ArrowStyle {
+        static let minimumLineWidth: CGFloat = 3
+        static let lineWidthRatio: CGFloat = 0.003
+        static let minimumHeadLength: CGFloat = 14
+        static let headLengthRatio: CGFloat = 4
+
+        static func lineWidth(forImageSize size: CGSize) -> CGFloat {
+            max(minimumLineWidth, min(size.width, size.height) * lineWidthRatio)
+        }
+
+        static func headLength(forLineWidth lineWidth: CGFloat) -> CGFloat {
+            max(minimumHeadLength, lineWidth * headLengthRatio)
+        }
     }
 
     private var screenshot: CGImage?
@@ -129,23 +214,57 @@ private final class AnnotationCanvasView: NSView {
         needsDisplay = true
     }
 
+    func clear() {
+        screenshot = nil
+        screenshotImage = nil
+        arrows.removeAll()
+        arrowStart = nil
+        pointerPosition = nil
+        needsDisplay = true
+    }
+
+    @discardableResult
+    func cancelCurrentAction() -> Bool {
+        guard arrowStart != nil else { return false }
+        arrowStart = nil
+        pointerPosition = nil
+        needsDisplay = true
+        return true
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         NSColor.windowBackgroundColor.setFill()
         bounds.fill()
 
-        guard screenshot != nil, let screenshotImage else { return }
+        guard let screenshot, let screenshotImage else { return }
         screenshotImage.draw(in: imageRect)
 
+        let style = previewStyle(for: screenshot)
         for arrow in arrows {
-            drawArrow(from: viewPoint(for: arrow.start), to: viewPoint(for: arrow.end))
+            drawArrow(
+                from: viewPoint(for: arrow.start),
+                to: viewPoint(for: arrow.end),
+                lineWidth: style.lineWidth,
+                headLength: style.headLength
+            )
         }
         if let arrowStart, let pointerPosition {
-            drawArrow(from: viewPoint(for: arrowStart), to: viewPoint(for: pointerPosition))
+            drawArrow(
+                from: viewPoint(for: arrowStart),
+                to: viewPoint(for: pointerPosition),
+                lineWidth: style.lineWidth,
+                headLength: style.headLength
+            )
         }
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard arrowToolIsSelected, let point = imagePoint(for: convert(event.locationInWindow, from: nil)) else { return }
+        guard arrowToolIsSelected else { return }
+        guard let point = imagePoint(for: convert(event.locationInWindow, from: nil)) else {
+            cancelCurrentAction()
+            return
+        }
+
         if let arrowStart {
             arrows.append(Arrow(start: arrowStart, end: point))
             self.arrowStart = nil
@@ -166,8 +285,14 @@ private final class AnnotationCanvasView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
-        if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "c" {
-            window?.performKeyEquivalent(with: event)
+        if event.keyCode == 53 {
+            if !cancelCurrentAction() {
+                window?.performKeyEquivalent(with: event)
+            }
+        } else if event.modifierFlags.contains(.command) {
+            if window?.performKeyEquivalent(with: event) != true {
+                super.keyDown(with: event)
+            }
         } else {
             super.keyDown(with: event)
         }
@@ -212,81 +337,83 @@ private final class AnnotationCanvasView: NSView {
         )
     }
 
-    private func drawArrow(from start: CGPoint, to end: CGPoint) {
-        let dx = end.x - start.x
-        let dy = end.y - start.y
-        let angle = atan2(dy, dx)
-        let headLength: CGFloat = 12
-        let headAngle: CGFloat = .pi / 6
-        let left = CGPoint(
-            x: end.x - headLength * cos(angle - headAngle),
-            y: end.y - headLength * sin(angle - headAngle)
-        )
-        let right = CGPoint(
-            x: end.x - headLength * cos(angle + headAngle),
-            y: end.y - headLength * sin(angle + headAngle)
-        )
+    private func previewStyle(for screenshot: CGImage) -> (lineWidth: CGFloat, headLength: CGFloat) {
+        let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
+        let imageLineWidth = ArrowStyle.lineWidth(forImageSize: imageSize)
+        let imageHeadLength = ArrowStyle.headLength(forLineWidth: imageLineWidth)
+        let scale = imageSize.width > 0 ? imageRect.width / imageSize.width : 1
+        return (imageLineWidth * scale, imageHeadLength * scale)
+    }
 
-        let path = NSBezierPath()
-        path.lineWidth = 3
-        path.lineCapStyle = .round
-        path.lineJoinStyle = .round
-        path.move(to: start)
-        path.line(to: end)
-        path.move(to: end)
-        path.line(to: left)
-        path.move(to: end)
-        path.line(to: right)
+    private func drawArrow(from start: CGPoint, to end: CGPoint, lineWidth: CGFloat, headLength: CGFloat) {
+        let path = Self.arrowPath(from: start, to: end, lineWidth: lineWidth, headLength: headLength)
         NSColor.systemRed.setStroke()
         path.stroke()
     }
 
     func imageWithAnnotations() -> NSImage? {
+        guard let image = renderCGImage() else { return nil }
+        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+    }
+
+    func pngDataWithAnnotations() -> Data? {
+        guard let image = renderCGImage() else { return nil }
+        return NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+    }
+
+    private func renderCGImage() -> CGImage? {
         guard let screenshot else { return nil }
         let width = screenshot.width
         let height = screenshot.height
-        guard let bitmap = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: width,
-            pixelsHigh: height,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: width * 4,
-            bitsPerPixel: 32
-        ), let graphics = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                  data: nil,
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 8,
+                  bytesPerRow: 0,
+                  space: colorSpace,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else { return nil }
 
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = graphics
-        graphics.imageInterpolation = .high
-        let imageSize = NSSize(width: width, height: height)
-        NSImage(cgImage: screenshot, size: imageSize).draw(
-            in: NSRect(origin: .zero, size: imageSize),
-            from: .zero,
-            operation: .copy,
-            fraction: 1
-        )
-        let lineWidth = max(3, CGFloat(min(width, height)) * 0.003)
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        context.interpolationQuality = .high
+        context.draw(screenshot, in: bounds)
+
+        let imageSize = CGSize(width: width, height: height)
+        let lineWidth = ArrowStyle.lineWidth(forImageSize: imageSize)
+        let headLength = ArrowStyle.headLength(forLineWidth: lineWidth)
+        let strokeColor = (NSColor.systemRed.usingColorSpace(.sRGB) ?? NSColor.systemRed).cgColor
+        context.setStrokeColor(strokeColor)
+        context.setLineWidth(lineWidth)
+        context.setLineCap(.round)
+        context.setLineJoin(.round)
+
         for arrow in arrows {
-            Self.drawArrow(arrow, imageHeight: height, lineWidth: lineWidth)
+            let path = Self.arrowPath(
+                from: flipped(arrow.start, imageHeight: height),
+                to: flipped(arrow.end, imageHeight: height),
+                lineWidth: lineWidth,
+                headLength: headLength
+            )
+            context.addPath(path.cgPath)
+            context.strokePath()
         }
-        graphics.flushGraphics()
-        NSGraphicsContext.restoreGraphicsState()
 
-        let result = NSImage(size: imageSize)
-        result.addRepresentation(bitmap)
-        return result
+        return context.makeImage()
     }
 
-    private static func drawArrow(_ arrow: Arrow, imageHeight: Int, lineWidth: CGFloat) {
-        let start = CGPoint(x: arrow.start.x, y: CGFloat(imageHeight) - arrow.start.y)
-        let end = CGPoint(x: arrow.end.x, y: CGFloat(imageHeight) - arrow.end.y)
-        let dx = end.x - start.x
-        let dy = end.y - start.y
-        let angle = atan2(dy, dx)
-        let headLength = max(14, lineWidth * 4)
+    private func flipped(_ point: CGPoint, imageHeight: Int) -> CGPoint {
+        CGPoint(x: point.x, y: CGFloat(imageHeight) - point.y)
+    }
+
+    private static func arrowPath(
+        from start: CGPoint,
+        to end: CGPoint,
+        lineWidth: CGFloat,
+        headLength: CGFloat
+    ) -> NSBezierPath {
+        let angle = atan2(end.y - start.y, end.x - start.x)
         let headAngle = CGFloat.pi / 6
         let left = CGPoint(
             x: end.x - headLength * cos(angle - headAngle),
@@ -307,7 +434,6 @@ private final class AnnotationCanvasView: NSView {
         path.line(to: left)
         path.move(to: end)
         path.line(to: right)
-        NSColor.systemRed.setStroke()
-        path.stroke()
+        return path
     }
 }
