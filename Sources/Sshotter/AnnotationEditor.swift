@@ -38,19 +38,14 @@ enum ArrowLineWidth: Int, CaseIterable {
     }
 }
 
-/// Preset colors shown in the options panel. The raw values keep the order
-/// used by earlier versions, so saved preferences still map to the same
-/// colors; declaration order is the 3×3 grid order.
 enum ArrowColor: Int, CaseIterable {
-    case red = 0
-    case orange = 1
-    case yellow = 2
-    case green = 3
-    case teal = 7
-    case blue = 4
-    case purple = 5
-    case black = 6
-    case white = 8
+    case red
+    case orange
+    case yellow
+    case green
+    case blue
+    case purple
+    case black
 
     var title: String {
         switch self {
@@ -58,11 +53,9 @@ enum ArrowColor: Int, CaseIterable {
         case .orange: "Orange"
         case .yellow: "Yellow"
         case .green: "Green"
-        case .teal: "Teal"
         case .blue: "Blue"
         case .purple: "Purple"
         case .black: "Black"
-        case .white: "White"
         }
     }
 
@@ -72,71 +65,32 @@ enum ArrowColor: Int, CaseIterable {
         case .orange: .systemOrange
         case .yellow: .systemYellow
         case .green: .systemGreen
-        case .teal: .systemTeal
         case .blue: .systemBlue
         case .purple: .systemPurple
         case .black: .black
-        case .white: .white
         }
     }
-}
 
-extension NSColor {
-    /// The same color in the sRGB space, which is what the canvas and the PNG
-    /// exporter work in. Pattern colors cannot be converted and pass through.
-    var sRGBResolved: NSColor {
-        usingColorSpace(.sRGB) ?? self
-    }
-
-    /// Compares colors in sRGB, ignoring the color space they were created in.
-    func matchesRGB(_ other: NSColor, tolerance: CGFloat = 0.004) -> Bool {
-        let lhs = sRGBResolved
-        let rhs = other.sRGBResolved
-        guard lhs.numberOfComponents >= 3, rhs.numberOfComponents >= 3 else {
-            return lhs == rhs
-        }
-        return abs(lhs.redComponent - rhs.redComponent) <= tolerance
-            && abs(lhs.greenComponent - rhs.greenComponent) <= tolerance
-            && abs(lhs.blueComponent - rhs.blueComponent) <= tolerance
-            && abs(lhs.alphaComponent - rhs.alphaComponent) <= tolerance
+    var cgColor: CGColor {
+        (nsColor.usingColorSpace(.sRGB) ?? nsColor).cgColor
     }
 }
 
 enum ArrowPreferences {
-    private static let legacyColorKey = "arrowColor"
-    private static let colorComponentsKey = "arrowColorComponents"
+    private static let colorKey = "arrowColor"
     private static let lineWidthKey = "arrowLineWidth"
 
-    static var color: NSColor {
+    static var color: ArrowColor {
         get {
             let defaults = UserDefaults.standard
-            if let stored = defaults.array(forKey: colorComponentsKey) as? [NSNumber],
-               stored.count >= 3 {
-                return NSColor(
-                    srgbRed: stored[0].doubleValue,
-                    green: stored[1].doubleValue,
-                    blue: stored[2].doubleValue,
-                    alpha: stored.count > 3 ? stored[3].doubleValue : 1
-                )
+            guard defaults.object(forKey: colorKey) != nil,
+                  let value = ArrowColor(rawValue: defaults.integer(forKey: colorKey)) else {
+                return .red
             }
-
-            // Preferences written before custom colors were supported stored an
-            // ArrowColor raw value under the legacy key.
-            if defaults.object(forKey: legacyColorKey) != nil,
-               let preset = ArrowColor(rawValue: defaults.integer(forKey: legacyColorKey)) {
-                return preset.nsColor
-            }
-            return .systemRed
+            return value
         }
         set {
-            let resolved = newValue.sRGBResolved
-            let components: [Double] = [
-                Double(resolved.redComponent),
-                Double(resolved.greenComponent),
-                Double(resolved.blueComponent),
-                Double(resolved.alphaComponent)
-            ]
-            UserDefaults.standard.set(components, forKey: colorComponentsKey)
+            UserDefaults.standard.set(newValue.rawValue, forKey: colorKey)
         }
     }
 
@@ -379,7 +333,6 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
     // MARK: Window delegate
 
     func windowWillClose(_ notification: Notification) {
-        canvas.closeColorPanel()
         // Keep the capture, annotations, title, and camera intact so the status
         // menu can reopen the editor exactly where it was left.
         onClose()
@@ -518,15 +471,15 @@ private final class ToolStripButton: HoverButton {
 
 @MainActor
 private final class ColorSwatchButton: HoverButton {
-    let swatchColor: NSColor
+    let arrowColor: ArrowColor
     private(set) var isSelected = false {
         didSet { needsDisplay = true }
     }
 
-    init(color: NSColor, title: String) {
-        swatchColor = color
+    init(color: ArrowColor) {
+        arrowColor = color
         super.init(frame: .zero)
-        toolTip = title
+        toolTip = color.title
     }
 
     required init?(coder: NSCoder) {
@@ -544,7 +497,7 @@ private final class ColorSwatchButton: HoverButton {
         }
 
         let dot = NSBezierPath(ovalIn: bounds.insetBy(dx: 3.5, dy: 3.5))
-        swatchColor.sRGBResolved.setFill()
+        arrowColor.nsColor.setFill()
         dot.fill()
         NSColor.separatorColor.setStroke()
         dot.lineWidth = 1
@@ -559,99 +512,16 @@ private final class ColorSwatchButton: HoverButton {
     }
 }
 
-/// A vertical rainbow chip that opens the full system color picker.
 @MainActor
-private final class CustomColorButton: HoverButton {
-    private static let rainbow: [NSColor] = [
-        .systemRed, .systemOrange, .systemYellow, .systemGreen,
-        .systemCyan, .systemBlue, .systemPurple, .systemPink
-    ]
-
-    private var isSelected = false {
-        didSet { needsDisplay = true }
-    }
-    private var currentColor: NSColor = .systemRed {
+private final class ThicknessButton: HoverButton {
+    let thickness: ArrowLineWidth
+    private(set) var isSelected = false {
         didSet { needsDisplay = true }
     }
 
-    init() {
+    init(thickness: ArrowLineWidth) {
+        self.thickness = thickness
         super.init(frame: .zero)
-        toolTip = "Custom color…"
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    func update(color: NSColor, selected: Bool) {
-        currentColor = color
-        isSelected = selected
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        if isHovered {
-            NSColor.labelColor.withAlphaComponent(0.08).setFill()
-            NSBezierPath(
-                roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
-                xRadius: 8,
-                yRadius: 8
-            ).fill()
-        }
-
-        let rect = bounds.insetBy(dx: 4, dy: 4)
-        let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
-        NSGradient(colors: Self.rainbow)?.draw(in: path, angle: -90)
-        NSColor.separatorColor.setStroke()
-        path.lineWidth = 1
-        path.stroke()
-
-        if isSelected {
-            let ring = NSBezierPath(
-                roundedRect: bounds.insetBy(dx: 1.5, dy: 1.5),
-                xRadius: 8,
-                yRadius: 8
-            )
-            NSColor.controlAccentColor.setStroke()
-            ring.lineWidth = 2
-            ring.stroke()
-
-            let chip = NSBezierPath(ovalIn: bounds.insetBy(dx: 7, dy: bounds.height / 2 - 6))
-            currentColor.sRGBResolved.setFill()
-            chip.fill()
-            NSColor.white.setStroke()
-            chip.lineWidth = 1.5
-            chip.stroke()
-        }
-    }
-}
-
-/// Right-angled ramp: short at the left, tall at the right. Dragging
-/// horizontally snaps to one of the arrow width presets.
-@MainActor
-private final class ThicknessSlider: NSView {
-    private static let minimumInset: CGFloat = 9
-    private static let knobRadius: CGFloat = 5.5
-
-    var onThicknessChanged: (@MainActor (ArrowLineWidth) -> Void)?
-
-    var thickness: ArrowLineWidth = .regular {
-        didSet {
-            guard thickness != oldValue else { return }
-            toolTip = "\(thickness.title) arrow"
-            needsDisplay = true
-        }
-    }
-
-    private var isHovered = false {
-        didSet { needsDisplay = true }
-    }
-    private var isDragging = false
-    private var trackingArea: NSTrackingArea?
-
-    override var acceptsFirstResponder: Bool { false }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
         toolTip = "\(thickness.title) arrow"
     }
 
@@ -659,132 +529,30 @@ private final class ThicknessSlider: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingArea {
-            removeTrackingArea(trackingArea)
-        }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        trackingArea = area
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        isHovered = true
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        isHovered = false
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        isDragging = true
-        updateThickness(with: event)
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard isDragging else { return }
-        updateThickness(with: event)
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        guard isDragging else { return }
-        updateThickness(with: event)
-        isDragging = false
-    }
-
-    private func updateThickness(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        let fraction = min(max((point.x - trackRect.minX) / trackRect.width, 0), 1)
-        let lastIndex = ArrowLineWidth.allCases.count - 1
-        let index = Int((fraction * CGFloat(lastIndex)).rounded())
-        guard let newThickness = ArrowLineWidth(rawValue: index),
-              newThickness != thickness else { return }
-        thickness = newThickness
-        onThicknessChanged?(newThickness)
-    }
-
-    private var trackRect: NSRect {
-        bounds.insetBy(dx: Self.minimumInset, dy: Self.minimumInset)
-    }
-
-    private func knobPoint(for thickness: ArrowLineWidth) -> NSPoint {
-        let lastIndex = max(1, ArrowLineWidth.allCases.count - 1)
-        let fraction = CGFloat(thickness.rawValue) / CGFloat(lastIndex)
-        let track = trackRect
-        return NSPoint(
-            x: track.minX + fraction * track.width,
-            y: track.minY + fraction * track.height
-        )
+    func setSelected(_ selected: Bool) {
+        isSelected = selected
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let track = trackRect
-        guard track.width > 0, track.height > 0 else { return }
-
-        if isHovered || isDragging {
-            NSColor.labelColor.withAlphaComponent(0.05).setFill()
+        if isSelected || isHovered {
+            let color: NSColor = isSelected
+                ? NSColor.controlAccentColor.withAlphaComponent(0.16)
+                : NSColor.labelColor.withAlphaComponent(0.07)
+            color.setFill()
             NSBezierPath(
                 roundedRect: bounds.insetBy(dx: 1, dy: 1),
-                xRadius: 7,
-                yRadius: 7
+                xRadius: 6,
+                yRadius: 6
             ).fill()
         }
 
-        let triangle = NSBezierPath()
-        triangle.move(to: NSPoint(x: track.minX, y: track.minY))
-        triangle.line(to: NSPoint(x: track.maxX, y: track.minY))
-        triangle.line(to: NSPoint(x: track.maxX, y: track.maxY))
-        triangle.close()
-
-        NSColor.labelColor.withAlphaComponent(0.07).setFill()
-        triangle.fill()
-
-        // Fill the part of the ramp up to the current value.
-        let knob = knobPoint(for: thickness)
-        NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(rect: NSRect(
-            x: track.minX,
-            y: track.minY,
-            width: max(0, knob.x - track.minX),
-            height: track.height
-        )).addClip()
-        NSColor.controlAccentColor.withAlphaComponent(0.28).setFill()
-        triangle.fill()
-        NSGraphicsContext.restoreGraphicsState()
-
-        NSColor.separatorColor.setStroke()
-        triangle.lineWidth = 1
-        triangle.stroke()
-
-        // Tick marks for the four widths, just under the ramp.
-        NSColor.tertiaryLabelColor.setStroke()
-        for preset in ArrowLineWidth.allCases {
-            let point = knobPoint(for: preset)
-            let tick = NSBezierPath()
-            tick.move(to: NSPoint(x: point.x, y: track.minY))
-            tick.line(to: NSPoint(x: point.x, y: track.minY - 3))
-            tick.lineWidth = 1
-            tick.stroke()
-        }
-
-        let knobRect = NSRect(
-            x: knob.x - Self.knobRadius,
-            y: knob.y - Self.knobRadius,
-            width: Self.knobRadius * 2,
-            height: Self.knobRadius * 2
-        )
-        let knobPath = NSBezierPath(ovalIn: knobRect)
-        NSColor.controlBackgroundColor.setFill()
-        knobPath.fill()
-        NSColor.controlAccentColor.setStroke()
-        knobPath.lineWidth = 2
-        knobPath.stroke()
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: bounds.midX - 8, y: bounds.midY))
+        path.line(to: NSPoint(x: bounds.midX + 8, y: bounds.midY))
+        path.lineWidth = thickness.previewWidth
+        path.lineCapStyle = .round
+        (isSelected ? NSColor.controlAccentColor : NSColor.labelColor).setStroke()
+        path.stroke()
     }
 }
 
@@ -794,30 +562,17 @@ private final class ThicknessSlider: NSView {
 private final class ArrowOptionsPanel: NSView {
     private static let swatchSize: CGFloat = 22
     private static let swatchSpacing: CGFloat = 6
-    private static let columnCount = 3
-    private static let rowCount = 3
-    private static let customColorWidth: CGFloat = 26
-    private static let customColorGap: CGFloat = 6
-    private static let sliderWidth: CGFloat = 136
-    private static let horizontalPadding: CGFloat = 12
-    private static let verticalPadding: CGFloat = 12
+    private static let thicknessSize: CGFloat = 28
+    private static let thicknessSpacing: CGFloat = 2
+    private static let horizontalPadding: CGFloat = 10
     private static let dividerGap: CGFloat = 12
+    private static let panelHeight: CGFloat = 44
 
-    private static var gridWidth: CGFloat {
-        CGFloat(columnCount) * swatchSize + CGFloat(columnCount - 1) * swatchSpacing
-    }
-
-    private static var gridHeight: CGFloat {
-        CGFloat(rowCount) * swatchSize + CGFloat(rowCount - 1) * swatchSpacing
-    }
-
-    var onColorSelected: (@MainActor (NSColor) -> Void)?
+    var onColorSelected: (@MainActor (ArrowColor) -> Void)?
     var onThicknessSelected: (@MainActor (ArrowLineWidth) -> Void)?
-    var onCustomColorRequested: (@MainActor () -> Void)?
 
     private var swatchButtons: [ColorSwatchButton] = []
-    private let customColorButton = CustomColorButton()
-    private let thicknessSlider = ThicknessSlider()
+    private var thicknessButtons: [ThicknessButton] = []
 
     override var isFlipped: Bool { false }
 
@@ -835,82 +590,94 @@ private final class ArrowOptionsPanel: NSView {
     }
 
     static var preferredSize: NSSize {
-        let width = horizontalPadding * 2
-            + gridWidth
-            + customColorGap + customColorWidth
-            + dividerGap * 2 + 1
-            + sliderWidth
-        let height = verticalPadding * 2 + gridHeight
-        return NSSize(width: width, height: height)
+        let swatches = CGFloat(ArrowColor.allCases.count) * swatchSize
+            + CGFloat(ArrowColor.allCases.count - 1) * swatchSpacing
+        let thicknesses = CGFloat(ArrowLineWidth.allCases.count) * thicknessSize
+            + CGFloat(ArrowLineWidth.allCases.count - 1) * thicknessSpacing
+        let width = horizontalPadding * 2 + swatches + dividerGap * 2 + 1 + thicknesses
+        return NSSize(width: width, height: panelHeight)
     }
 
     private func buildSubviews() {
-        for (index, preset) in ArrowColor.allCases.enumerated() {
-            let button = ColorSwatchButton(color: preset.nsColor, title: preset.title)
+        var x = Self.horizontalPadding
+
+        for color in ArrowColor.allCases {
+            let button = ColorSwatchButton(color: color)
+            button.tag = color.rawValue
             button.target = self
             button.action = #selector(selectColor(_:))
-            let column = index % Self.columnCount
-            let row = index / Self.columnCount
-            let x = Self.horizontalPadding
-                + CGFloat(column) * (Self.swatchSize + Self.swatchSpacing)
-            let y = Self.verticalPadding
-                + CGFloat(Self.rowCount - 1 - row) * (Self.swatchSize + Self.swatchSpacing)
-            button.frame = NSRect(x: x, y: y, width: Self.swatchSize, height: Self.swatchSize)
+            button.frame = NSRect(
+                x: x,
+                y: (Self.panelHeight - Self.swatchSize) / 2,
+                width: Self.swatchSize,
+                height: Self.swatchSize
+            )
             addSubview(button)
             swatchButtons.append(button)
+            x += Self.swatchSize + Self.swatchSpacing
         }
 
-        let customX = Self.horizontalPadding + Self.gridWidth + Self.customColorGap
-        customColorButton.target = self
-        customColorButton.action = #selector(selectCustomColor(_:))
-        customColorButton.frame = NSRect(
-            x: customX,
-            y: Self.verticalPadding,
-            width: Self.customColorWidth,
-            height: Self.gridHeight
-        )
-        addSubview(customColorButton)
+        x += Self.dividerGap - Self.swatchSpacing
 
-        let dividerX = customX + Self.customColorWidth + Self.dividerGap
         let divider = NSBox(frame: NSRect(
-            x: dividerX,
-            y: Self.verticalPadding,
+            x: x,
+            y: 10,
             width: 1,
-            height: Self.gridHeight
+            height: Self.panelHeight - 20
         ))
         divider.boxType = .separator
         addSubview(divider)
 
-        thicknessSlider.onThicknessChanged = { [weak self] thickness in
-            self?.onThicknessSelected?(thickness)
+        x += 1 + Self.dividerGap
+
+        for thickness in ArrowLineWidth.allCases {
+            let button = ThicknessButton(thickness: thickness)
+            button.tag = thickness.rawValue
+            button.target = self
+            button.action = #selector(selectThickness(_:))
+            button.frame = NSRect(
+                x: x,
+                y: (Self.panelHeight - Self.thicknessSize) / 2,
+                width: Self.thicknessSize,
+                height: Self.thicknessSize
+            )
+            addSubview(button)
+            thicknessButtons.append(button)
+            x += Self.thicknessSize + Self.thicknessSpacing
         }
-        thicknessSlider.frame = NSRect(
-            x: dividerX + 1 + Self.dividerGap,
-            y: Self.verticalPadding,
-            width: Self.sliderWidth,
-            height: Self.gridHeight
-        )
-        addSubview(thicknessSlider)
     }
 
-    func updateSelection(color: NSColor, thickness: ArrowLineWidth) {
-        var matchesPreset = false
+    func updateSelection(color: ArrowColor, thickness: ArrowLineWidth) {
         for button in swatchButtons {
-            let matches = button.swatchColor.matchesRGB(color)
-            button.setSelected(matches)
-            matchesPreset = matchesPreset || matches
+            button.setSelected(button.tag == color.rawValue)
         }
-        customColorButton.update(color: color, selected: !matchesPreset)
-        thicknessSlider.thickness = thickness
+        for button in thicknessButtons {
+            button.setSelected(button.tag == thickness.rawValue)
+        }
     }
 
-    @objc private func selectColor(_ sender: ColorSwatchButton) {
-        updateSelection(color: sender.swatchColor, thickness: thicknessSlider.thickness)
-        onColorSelected?(sender.swatchColor)
+    @objc private func selectColor(_ sender: NSButton) {
+        guard let color = ArrowColor(rawValue: sender.tag) else { return }
+        updateSelection(color: color, thickness: currentThicknessFromButtons())
+        onColorSelected?(color)
     }
 
-    @objc private func selectCustomColor(_ sender: Any?) {
-        onCustomColorRequested?()
+    @objc private func selectThickness(_ sender: NSButton) {
+        guard let thickness = ArrowLineWidth(rawValue: sender.tag) else { return }
+        updateSelection(color: currentColorFromButtons(), thickness: thickness)
+        onThicknessSelected?(thickness)
+    }
+
+    private func currentColorFromButtons() -> ArrowColor {
+        guard let tag = swatchButtons.first(where: { $0.isSelected })?.tag,
+              let color = ArrowColor(rawValue: tag) else { return .red }
+        return color
+    }
+
+    private func currentThicknessFromButtons() -> ArrowLineWidth {
+        guard let tag = thicknessButtons.first(where: { $0.isSelected })?.tag,
+              let thickness = ArrowLineWidth(rawValue: tag) else { return .regular }
+        return thickness
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -951,7 +718,7 @@ private final class AnnotationCanvasView: NSView {
     private struct Arrow {
         var start: CGPoint
         var end: CGPoint
-        var color: NSColor
+        var color: ArrowColor
         var thickness: ArrowLineWidth
     }
 
@@ -1005,9 +772,6 @@ private final class AnnotationCanvasView: NSView {
         }
         optionsPanel.onThicknessSelected = { [weak self] thickness in
             self?.applyThickness(thickness)
-        }
-        optionsPanel.onCustomColorRequested = { [weak self] in
-            self?.showColorPanel()
         }
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
         addSubview(optionsPanel)
@@ -1101,7 +865,7 @@ private final class AnnotationCanvasView: NSView {
                 to: contentToView(arrow.end),
                 lineWidth: lineWidth * scale,
                 headLength: headLength * scale,
-                color: arrow.color
+                color: arrow.color.nsColor
             )
             if index == selectedArrowIndex {
                 drawHandles(for: arrow)
@@ -1119,7 +883,7 @@ private final class AnnotationCanvasView: NSView {
                 to: contentToView(pointerPosition),
                 lineWidth: lineWidth * scale,
                 headLength: headLength * scale,
-                color: currentColor
+                color: currentColor.nsColor
             )
         }
     }
@@ -1157,7 +921,7 @@ private final class AnnotationCanvasView: NSView {
             lineWidth: lineWidth,
             headLength: headLength
         )
-        color.sRGBResolved.setStroke()
+        color.setStroke()
         path.stroke()
     }
 
@@ -1172,7 +936,7 @@ private final class AnnotationCanvasView: NSView {
             let path = NSBezierPath(ovalIn: rect)
             NSColor.white.setFill()
             path.fill()
-            arrow.color.sRGBResolved.setStroke()
+            arrow.color.nsColor.setStroke()
             path.lineWidth = 2
             path.stroke()
         }
@@ -1379,17 +1143,14 @@ private final class AnnotationCanvasView: NSView {
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
     }
 
-    private func applyColor(_ color: NSColor, refocusCanvas: Bool = true) {
+    private func applyColor(_ color: ArrowColor) {
         currentColor = color
         ArrowPreferences.color = color
         if let index = selectedArrowIndex, arrows.indices.contains(index) {
             arrows[index].color = color
         }
-        optionsPanel.updateSelection(color: color, thickness: currentThickness)
         needsDisplay = true
-        if refocusCanvas {
-            window?.makeFirstResponder(self)
-        }
+        window?.makeFirstResponder(self)
     }
 
     private func applyThickness(_ thickness: ArrowLineWidth) {
@@ -1398,36 +1159,8 @@ private final class AnnotationCanvasView: NSView {
         if let index = selectedArrowIndex, arrows.indices.contains(index) {
             arrows[index].thickness = thickness
         }
-        optionsPanel.updateSelection(color: currentColor, thickness: thickness)
         needsDisplay = true
         window?.makeFirstResponder(self)
-    }
-
-    // MARK: Custom color
-
-    private func showColorPanel() {
-        let panel = NSColorPanel.shared
-        panel.showsAlpha = false
-        panel.isContinuous = true
-        panel.color = currentColor
-        panel.setTarget(self)
-        panel.setAction(#selector(colorPanelChanged(_:)))
-        panel.makeKeyAndOrderFront(nil)
-    }
-
-    @objc private func colorPanelChanged(_ sender: NSColorPanel) {
-        // Keep the panel focused while the user drags or types in it.
-        applyColor(sender.color, refocusCanvas: false)
-    }
-
-    /// Detaches the shared panel when the editor closes so it does not linger
-    /// or keep sending changes to a hidden canvas.
-    func closeColorPanel() {
-        guard NSColorPanel.sharedColorPanelExists else { return }
-        let panel = NSColorPanel.shared
-        panel.setTarget(nil)
-        panel.setAction(nil)
-        panel.orderOut(nil)
     }
 
     private func updateOptionsVisibility(animated: Bool = true) {
@@ -1781,7 +1514,7 @@ private final class AnnotationCanvasView: NSView {
                 thickness: arrow.thickness
             )
             let headLength = ArrowGeometry.headLength(forLineWidth: lineWidth)
-            context.setStrokeColor(arrow.color.sRGBResolved.cgColor)
+            context.setStrokeColor(arrow.color.cgColor)
             context.setLineWidth(lineWidth)
 
             let path = ArrowGeometry.path(
