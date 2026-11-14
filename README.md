@@ -39,11 +39,14 @@ zooms around the pointer. Two-finger scroll pans when you need to reach another
 part of the canvas. Press **⌘0** (or two-finger double-tap) to fit all content,
 including arrows that extend into the grey area, with a border again.
 
-After the first arrow, an options panel appears at the top-right with color
-swatches and line thickness buttons. Changes apply to the selected arrow (or to
-the next arrow if nothing is selected) and are remembered between launches.
-Copy and Save grow the output to include every arrow; the added area outside
-the original capture stays transparent.
+After the first arrow, an options panel appears at the top-right with a 3×3
+grid of preset colors, a rainbow button that opens the full system color picker,
+and a triangular thickness slider: the narrow left end is a thin line and the
+tall right end is a thick one. Choose a preset, pick any color in the system
+picker, or drag the slider. Changes apply to the selected arrow (or to the next
+arrow if nothing is selected) and are remembered between launches. Copy and
+Save grow the output to include every arrow; the added area outside the original
+capture stays transparent.
 
 Press **⌘C** to copy the annotated image and close the window, or **⌘S** to save
 a PNG to your chosen folder. Press **Esc** to cancel a drag, then again to
