@@ -13,6 +13,8 @@ open dist/sshooter.app
 
 The app appears in the menu bar. Choose **Capture Area** or press **⌘⇧2**,
 drag over the screen, and the selected area opens in the annotation window.
+While selecting, dotted horizontal and vertical guides follow the pointer
+across the whole screen to help line up the capture.
 
 Draw an arrow by dragging on the canvas. The arrow tool stays highlighted while
 it is active; click it again to stop drawing and just select arrows. The new

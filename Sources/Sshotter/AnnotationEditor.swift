@@ -973,18 +973,15 @@ private final class AnnotationCanvasView: NSView {
                     )
                 )
             }
-            NSCursor.closedHand.set()
         } else if isImageToolActive {
             selectedArrowIndex = nil
             optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
             dragMode = .drawing(start: contentPoint)
             pointerPosition = contentPoint
-            NSCursor.crosshair.set()
         } else {
             selectedArrowIndex = nil
             dragMode = nil
             optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
-            NSCursor.arrow.set()
         }
         needsDisplay = true
     }
@@ -1127,18 +1124,11 @@ private final class AnnotationCanvasView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
-        NSCursor.crosshair.set()
+        NSCursor.arrow.set()
     }
 
-    private func updateCursor(at pointInView: CGPoint) {
-        guard dragMode == nil else { return }
-        if hitTest(at: pointInView) != nil {
-            NSCursor.openHand.set()
-        } else if isImageToolActive {
-            NSCursor.crosshair.set()
-        } else {
-            NSCursor.arrow.set()
-        }
+    private func updateCursor(at _: CGPoint) {
+        NSCursor.arrow.set()
     }
 
     // MARK: Selection and style

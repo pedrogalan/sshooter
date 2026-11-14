@@ -301,6 +301,7 @@ private final class RegionSelectionView: NSView {
     private let onCancel: () -> Void
     private var startPoint: CGPoint?
     private var currentPoint: CGPoint?
+    private var guidePoint: CGPoint?
     private var hasFinished = false
 
     init(
@@ -341,10 +342,12 @@ private final class RegionSelectionView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
+        updateGuide(with: event)
         NSCursor.crosshair.set()
     }
 
     override func mouseMoved(with event: NSEvent) {
+        updateGuide(with: event)
         NSCursor.crosshair.set()
     }
 
@@ -358,16 +361,62 @@ private final class RegionSelectionView: NSView {
         NSColor.black.withAlphaComponent(0.32).setFill()
         bounds.fill()
 
-        guard let selection = selectionRect, !selection.isEmpty else { return }
-        NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(rect: selection).addClip()
-        screenImage.draw(in: bounds)
-        NSGraphicsContext.restoreGraphicsState()
+        if let selection = selectionRect, !selection.isEmpty {
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: selection).addClip()
+            screenImage.draw(in: bounds)
+            NSGraphicsContext.restoreGraphicsState()
 
-        NSColor.white.setStroke()
-        let border = NSBezierPath(rect: selection)
-        border.lineWidth = 1.5
-        border.stroke()
+            NSColor.white.setStroke()
+            let border = NSBezierPath(rect: selection)
+            border.lineWidth = 1.5
+            border.stroke()
+        }
+
+        drawGuideLines()
+    }
+
+    /// Full-width and full-height dotted guides that meet at the pointer, so
+    /// the selection can be lined up with things elsewhere on the screen.
+    private func drawGuideLines() {
+        guard !hasFinished, let guidePoint else { return }
+
+        let path = NSBezierPath()
+        path.move(to: CGPoint(x: bounds.minX, y: guidePoint.y))
+        path.line(to: CGPoint(x: bounds.maxX, y: guidePoint.y))
+        path.move(to: CGPoint(x: guidePoint.x, y: bounds.minY))
+        path.line(to: CGPoint(x: guidePoint.x, y: bounds.maxY))
+        path.lineWidth = 1
+        path.setLineDash([4, 4], count: 2, phase: 0)
+
+        // Alternating black and white dashes stay visible on any background.
+        NSColor.black.withAlphaComponent(0.7).setStroke()
+        path.stroke()
+        path.setLineDash([4, 4], count: 2, phase: 4)
+        NSColor.white.withAlphaComponent(0.95).setStroke()
+        path.stroke()
+    }
+
+    private func updateGuide(with event: NSEvent) {
+        updateGuide(to: convert(event.locationInWindow, from: nil))
+    }
+
+    private func updateGuide(to point: CGPoint) {
+        guard !hasFinished else { return }
+        let oldPoint = guidePoint
+        guard oldPoint != point else { return }
+        guidePoint = point
+
+        var dirty = guideBand(at: point)
+        if let oldPoint {
+            dirty = dirty.union(guideBand(at: oldPoint))
+        }
+        setNeedsDisplay(dirty)
+    }
+
+    private func guideBand(at point: CGPoint) -> CGRect {
+        CGRect(x: bounds.minX, y: point.y - 1, width: bounds.width, height: 3)
+            .union(CGRect(x: point.x - 1, y: bounds.minY, width: 3, height: bounds.height))
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -375,18 +424,23 @@ private final class RegionSelectionView: NSView {
         let point = convert(event.locationInWindow, from: nil)
         startPoint = point
         currentPoint = point
+        updateGuide(to: point)
         needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard !hasFinished else { return }
-        currentPoint = convert(event.locationInWindow, from: nil)
+        let point = convert(event.locationInWindow, from: nil)
+        currentPoint = point
+        updateGuide(to: point)
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
         guard !hasFinished else { return }
-        currentPoint = convert(event.locationInWindow, from: nil)
+        let point = convert(event.locationInWindow, from: nil)
+        currentPoint = point
+        updateGuide(to: point)
         guard let selection = selectionRect,
               selection.width >= 2,
               selection.height >= 2,
@@ -398,6 +452,8 @@ private final class RegionSelectionView: NSView {
         // Keep the overlay on screen while the capture runs so the app is
         // present in ScreenCaptureKit's window list and can be excluded.
         hasFinished = true
+        guidePoint = nil
+        needsDisplay = true
         NSCursor.arrow.set()
         onComplete(screenRect)
     }
