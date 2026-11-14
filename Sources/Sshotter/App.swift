@@ -21,6 +21,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var eventHandler: EventHandlerRef?
     private var statusMenu: NSMenu?
     private var saveFolderItem: NSMenuItem?
+    private var reopenEditorItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let button = statusItem.button {
@@ -50,6 +51,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         )
         captureItem.target = self
         menu.addItem(captureItem)
+
+        let reopenItem = NSMenuItem(
+            title: "Reopen Editor",
+            action: #selector(reopenEditor(_:)),
+            keyEquivalent: ""
+        )
+        reopenItem.target = self
+        reopenItem.isEnabled = CaptureModel.shared.canReopenEditor
+        menu.addItem(reopenItem)
+        reopenEditorItem = reopenItem
+
         menu.addItem(.separator())
 
         let folderItem = NSMenuItem(
@@ -76,6 +88,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         saveFolderItem?.title = saveFolderTitle()
+        reopenEditorItem?.isEnabled = CaptureModel.shared.canReopenEditor
+    }
+
+    @objc private func reopenEditor(_ sender: Any?) {
+        CaptureModel.shared.reopenEditor()
     }
 
     @objc private func chooseSaveFolder(_ sender: Any?) {

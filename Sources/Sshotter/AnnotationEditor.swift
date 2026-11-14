@@ -264,6 +264,17 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         makeFirstResponder(canvas)
     }
 
+    /// Whether there is still a capture with its annotations to show again.
+    var hasContent: Bool { canvas.hasImage }
+
+    /// Brings the previously closed editor back with its content and camera
+    /// exactly as they were.
+    func reopen() {
+        guard hasContent else { return }
+        makeKeyAndOrderFront(nil)
+        makeFirstResponder(canvas)
+    }
+
     // MARK: Actions
 
     @objc private func toggleArrowTool(_ sender: Any?) {
@@ -322,8 +333,8 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
     // MARK: Window delegate
 
     func windowWillClose(_ notification: Notification) {
-        canvas.clear()
-        title = "Screenshot"
+        // Keep the capture, annotations, title, and camera intact so the status
+        // menu can reopen the editor exactly where it was left.
         onClose()
     }
 
@@ -772,6 +783,8 @@ private final class AnnotationCanvasView: NSView {
 
     // MARK: Content
 
+    var hasImage: Bool { screenshot != nil }
+
     func setImage(_ image: CGImage) {
         screenshot = image
         screenshotImage = NSImage(
@@ -788,18 +801,6 @@ private final class AnnotationCanvasView: NSView {
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
         updateOptionsVisibility(animated: false)
         fitCameraToContent()
-        needsDisplay = true
-    }
-
-    func clear() {
-        screenshot = nil
-        screenshotImage = nil
-        arrows.removeAll()
-        selectedArrowIndex = nil
-        dragMode = nil
-        pointerPosition = nil
-        hasCamera = false
-        updateOptionsVisibility(animated: false)
         needsDisplay = true
     }
 

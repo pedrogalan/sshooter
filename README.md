@@ -16,6 +16,10 @@ drag over the screen, and the selected area opens in the annotation window.
 While selecting, dotted horizontal and vertical guides follow the pointer
 across the whole screen to help line up the capture.
 
+After closing the editor, choose **Reopen Editor** from the camera menu to bring
+back the last capture with its arrows, selection, and zoom exactly as you left
+it. A new capture replaces the stored one.
+
 Draw an arrow by dragging on the canvas. The arrow tool stays highlighted while
 it is active; click it again to stop drawing and just select arrows. The new
 arrow stays selected: drag either endpoint to change its length or direction,

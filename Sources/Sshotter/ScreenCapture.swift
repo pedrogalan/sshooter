@@ -205,6 +205,17 @@ final class CaptureModel {
         editorWindow?.close()
     }
 
+    var canReopenEditor: Bool {
+        editorWindow?.hasContent ?? false
+    }
+
+    func reopenEditor() {
+        guard let editorWindow, editorWindow.hasContent else { return }
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate()
+        editorWindow.reopen()
+    }
+
     private func copyToClipboard(_ image: NSImage) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
