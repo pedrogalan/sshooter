@@ -14,13 +14,32 @@ open dist/sshooter.app
 The app appears in the menu bar. Choose **Capture Area** or press **⌘⇧2**,
 drag over the screen, and the selected area opens in the annotation window.
 
-Draw an arrow by dragging on the image. The new arrow stays selected: drag
-either endpoint to change its length or direction, or drag the line itself to
-move the whole arrow. Press **Delete** to remove the selected arrow.
+Draw an arrow by dragging on the canvas. The arrow tool stays highlighted while
+it is active; click it again to stop drawing and just select arrows. The new
+arrow stays selected: drag either endpoint to change its length or direction,
+or drag the line itself to move the whole arrow. Press **Delete** to remove the
+selected arrow.
 
-Use the **Thickness** and **Head Size** menus in the toolbar to change how
-arrows look. Head size is relative to the line thickness, so the arrowhead
-grows with the line. The choices are remembered between launches.
+The canvas has a checkerboard work area around the image, so arrows can start
+or end outside the capture. The image and the arrows together are treated as
+the content: they are fitted at up to 1:1 into the window with a checkerboard
+border on every side. Smaller captures therefore get a larger grey area, and
+when an arrow reaches past the edge the canvas zooms out to keep a border
+around the content, with the drag anchored to the pointer. On release the view
+re-centers on the content. This zoom is visual only; Copy and Save always use
+the content's real pixel size regardless of the zoom level.
+
+To zoom manually, pinch on a trackpad or hold **⌘** and scroll; the content
+zooms around the pointer. Two-finger scroll pans when you need to reach another
+part of the canvas. Press **⌘0** (or two-finger double-tap) to fit the content
+again. While you are zoomed in, drawing inside the image keeps your zoom; if a
+new arrow makes the content larger, releasing the mouse refits it with a border.
+
+After the first arrow, an options panel appears at the top-right with color
+swatches and line thickness buttons. Changes apply to the selected arrow (or to
+the next arrow if nothing is selected) and are remembered between launches.
+Copy and Save grow the output to include every arrow; the added area outside
+the original capture stays transparent.
 
 Press **⌘C** to copy the annotated image and close the window, or **⌘S** to save
 a PNG to your chosen folder. Press **Esc** to cancel a drag, then again to

@@ -26,33 +26,73 @@ enum ArrowLineWidth: Int, CaseIterable {
         case .extraBold: 2.6
         }
     }
+
+    /// Stroke width used by the little preview glyphs in the options panel.
+    var previewWidth: CGFloat {
+        switch self {
+        case .thin: 1.5
+        case .regular: 2.5
+        case .bold: 4
+        case .extraBold: 6
+        }
+    }
 }
 
-enum ArrowHeadSize: Int, CaseIterable {
-    case small
-    case medium
-    case large
+enum ArrowColor: Int, CaseIterable {
+    case red
+    case orange
+    case yellow
+    case green
+    case blue
+    case purple
+    case black
 
     var title: String {
         switch self {
-        case .small: "Small"
-        case .medium: "Medium"
-        case .large: "Large"
+        case .red: "Red"
+        case .orange: "Orange"
+        case .yellow: "Yellow"
+        case .green: "Green"
+        case .blue: "Blue"
+        case .purple: "Purple"
+        case .black: "Black"
         }
     }
 
-    var multiplier: CGFloat {
+    var nsColor: NSColor {
         switch self {
-        case .small: 2.6
-        case .medium: 4
-        case .large: 6
+        case .red: .systemRed
+        case .orange: .systemOrange
+        case .yellow: .systemYellow
+        case .green: .systemGreen
+        case .blue: .systemBlue
+        case .purple: .systemPurple
+        case .black: .black
         }
+    }
+
+    var cgColor: CGColor {
+        (nsColor.usingColorSpace(.sRGB) ?? nsColor).cgColor
     }
 }
 
 enum ArrowPreferences {
+    private static let colorKey = "arrowColor"
     private static let lineWidthKey = "arrowLineWidth"
-    private static let headSizeKey = "arrowHeadSize"
+
+    static var color: ArrowColor {
+        get {
+            let defaults = UserDefaults.standard
+            guard defaults.object(forKey: colorKey) != nil,
+                  let value = ArrowColor(rawValue: defaults.integer(forKey: colorKey)) else {
+                return .red
+            }
+            return value
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: colorKey)
+        }
+    }
 
     static var lineWidth: ArrowLineWidth {
         get {
@@ -67,20 +107,6 @@ enum ArrowPreferences {
             UserDefaults.standard.set(newValue.rawValue, forKey: lineWidthKey)
         }
     }
-
-    static var headSize: ArrowHeadSize {
-        get {
-            let defaults = UserDefaults.standard
-            guard defaults.object(forKey: headSizeKey) != nil,
-                  let value = ArrowHeadSize(rawValue: defaults.integer(forKey: headSizeKey)) else {
-                return .medium
-            }
-            return value
-        }
-        set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: headSizeKey)
-        }
-    }
 }
 
 enum ArrowGeometry {
@@ -89,8 +115,10 @@ enum ArrowGeometry {
         return base * thickness.multiplier
     }
 
-    static func headLength(forLineWidth lineWidth: CGFloat, headSize: ArrowHeadSize) -> CGFloat {
-        max(10, lineWidth * headSize.multiplier)
+    /// The head scales with the line, so thicker arrows get proportionally
+    /// larger heads without a separate setting.
+    static func headLength(forLineWidth lineWidth: CGFloat) -> CGFloat {
+        max(10, lineWidth * 4)
     }
 
     static func path(
@@ -127,25 +155,27 @@ enum ArrowGeometry {
 // MARK: - Editor window
 
 @MainActor
-final class AnnotationEditorWindow: NSWindow, NSToolbarDelegate, NSWindowDelegate {
-    private static let arrowToolID = NSToolbarItem.Identifier("sshooter.arrowTool")
-    private static let thicknessToolID = NSToolbarItem.Identifier("sshooter.thicknessTool")
-    private static let headSizeToolID = NSToolbarItem.Identifier("sshooter.headSizeTool")
-    private static let saveToolID = NSToolbarItem.Identifier("sshooter.saveTool")
-    private static let copyToolID = NSToolbarItem.Identifier("sshooter.copyTool")
-
+final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
+    private let container = EditorContainerView()
+    private let toolStrip = EditorToolStrip()
     private let canvas = AnnotationCanvasView()
     private let onCopy: @MainActor (NSImage) -> Void
     private let onSave: @MainActor (Data) throws -> URL?
     private let onClose: @MainActor () -> Void
     private var hasPositionedWindow = false
 
-    private var lineWidth = ArrowPreferences.lineWidth
-    private var headSize = ArrowPreferences.headSize
-    private var thicknessMenu: NSMenu?
-    private var headSizeMenu: NSMenu?
-    private var thicknessItem: NSMenuToolbarItem?
-    private var headSizeItem: NSMenuToolbarItem?
+    private let copyButton = ToolStripButton(
+        symbolName: "doc.on.doc",
+        toolTip: "Copy the annotated image and close this window (⌘C)"
+    )
+    private let saveButton = ToolStripButton(
+        symbolName: "square.and.arrow.down",
+        toolTip: "Save a PNG to your chosen folder (⌘S)"
+    )
+    private let arrowButton = ToolStripButton(
+        symbolName: "arrow.up.right",
+        toolTip: "Arrow tool: drag on the canvas to draw. Click again to stop drawing."
+    )
 
     init(
         onCopy: @escaping @MainActor (NSImage) -> Void,
@@ -156,28 +186,67 @@ final class AnnotationEditorWindow: NSWindow, NSToolbarDelegate, NSWindowDelegat
         self.onSave = onSave
         self.onClose = onClose
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
+            contentRect: NSRect(x: 0, y: 0, width: 960, height: 680),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
 
         title = "Screenshot"
-        minSize = NSSize(width: 560, height: 380)
+        minSize = NSSize(width: 600, height: 420)
         isReleasedWhenClosed = false
         acceptsMouseMovedEvents = true
         delegate = self
-        canvas.setLineWidth(lineWidth)
-        canvas.setHeadSize(headSize)
-        canvas.autoresizingMask = [.width, .height]
-        contentView = canvas
 
-        let toolbar = NSToolbar(identifier: "sshooter.annotationToolbar")
-        toolbar.delegate = self
-        toolbar.displayMode = .iconAndLabel
-        toolbar.allowsUserCustomization = false
-        self.toolbar = toolbar
+        contentView = container
+        configureToolStrip()
+        configureCanvas()
+
+        canvas.setImageToolActive(true)
+        arrowButton.setActive(true)
     }
+
+    // MARK: Setup
+
+    private func configureToolStrip() {
+        toolStrip.translatesAutoresizingMaskIntoConstraints = false
+
+        copyButton.frame = NSRect(x: 12, y: 8, width: 32, height: 32)
+        copyButton.target = self
+        copyButton.action = #selector(copyScreenshot(_:))
+        toolStrip.addSubview(copyButton)
+
+        saveButton.frame = NSRect(x: 52, y: 8, width: 32, height: 32)
+        saveButton.target = self
+        saveButton.action = #selector(saveScreenshot(_:))
+        toolStrip.addSubview(saveButton)
+
+        arrowButton.frame = NSRect(x: 106, y: 8, width: 40, height: 32)
+        arrowButton.target = self
+        arrowButton.action = #selector(toggleArrowTool(_:))
+        toolStrip.addSubview(arrowButton)
+
+        container.addSubview(toolStrip)
+        NSLayoutConstraint.activate([
+            toolStrip.topAnchor.constraint(equalTo: container.topAnchor),
+            toolStrip.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            toolStrip.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            toolStrip.heightAnchor.constraint(equalToConstant: EditorToolStrip.height)
+        ])
+    }
+
+    private func configureCanvas() {
+        canvas.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(canvas)
+        NSLayoutConstraint.activate([
+            canvas.topAnchor.constraint(equalTo: toolStrip.bottomAnchor),
+            canvas.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            canvas.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            canvas.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
+    }
+
+    // MARK: Presentation
 
     func present(image: CGImage) {
         canvas.setImage(image)
@@ -189,155 +258,22 @@ final class AnnotationEditorWindow: NSWindow, NSToolbarDelegate, NSWindowDelegat
             hasPositionedWindow = true
         }
 
+        setArrowToolActive(true)
         NSApp.activate()
         makeKeyAndOrderFront(nil)
         makeFirstResponder(canvas)
     }
 
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [
-            Self.arrowToolID,
-            Self.thicknessToolID,
-            Self.headSizeToolID,
-            .flexibleSpace,
-            Self.saveToolID,
-            Self.copyToolID
-        ]
-    }
+    // MARK: Actions
 
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [
-            Self.arrowToolID,
-            Self.thicknessToolID,
-            Self.headSizeToolID,
-            .flexibleSpace,
-            Self.saveToolID,
-            Self.copyToolID
-        ]
-    }
-
-    func toolbar(
-        _ toolbar: NSToolbar,
-        itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
-        willBeInsertedIntoToolbar flag: Bool
-    ) -> NSToolbarItem? {
-        switch itemIdentifier {
-        case Self.arrowToolID:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Arrow"
-            item.paletteLabel = "Arrow"
-            item.toolTip = "Click and drag on the image to draw an arrow."
-            item.image = NSImage(systemSymbolName: "arrow.up.right", accessibilityDescription: "Arrow tool")
-            item.target = self
-            item.action = #selector(selectArrowTool)
-            return item
-        case Self.thicknessToolID:
-            let item = NSMenuToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Thickness"
-            item.paletteLabel = "Arrow Thickness"
-            item.image = NSImage(systemSymbolName: "lineweight", accessibilityDescription: "Arrow thickness")
-            let menu = makeLineWidthMenu()
-            item.menu = menu
-            thicknessMenu = menu
-            thicknessItem = item
-            updateStyleMenuStates()
-            return item
-        case Self.headSizeToolID:
-            let item = NSMenuToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Head Size"
-            item.paletteLabel = "Arrow Head Size"
-            item.image = NSImage(systemSymbolName: "arrowtriangle.up", accessibilityDescription: "Arrow head size")
-            let menu = makeHeadSizeMenu()
-            item.menu = menu
-            headSizeMenu = menu
-            headSizeItem = item
-            updateStyleMenuStates()
-            return item
-        case Self.saveToolID:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Save"
-            item.paletteLabel = "Save Screenshot"
-            item.toolTip = "Save a PNG to your chosen folder (⌘S)."
-            item.image = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "Save")
-            item.target = self
-            item.action = #selector(saveScreenshot(_:))
-            return item
-        case Self.copyToolID:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Copy"
-            item.paletteLabel = "Copy Screenshot"
-            item.toolTip = "Copy the annotated image and close this window (⌘C)."
-            item.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy")
-            item.target = self
-            item.action = #selector(copyScreenshot(_:))
-            return item
-        default:
-            return nil
-        }
-    }
-
-    private func makeLineWidthMenu() -> NSMenu {
-        let menu = NSMenu()
-        for value in ArrowLineWidth.allCases {
-            let item = NSMenuItem(
-                title: value.title,
-                action: #selector(selectLineWidth(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.tag = value.rawValue
-            menu.addItem(item)
-        }
-        return menu
-    }
-
-    private func makeHeadSizeMenu() -> NSMenu {
-        let menu = NSMenu()
-        for value in ArrowHeadSize.allCases {
-            let item = NSMenuItem(
-                title: value.title,
-                action: #selector(selectHeadSize(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.tag = value.rawValue
-            menu.addItem(item)
-        }
-        return menu
-    }
-
-    private func updateStyleMenuStates() {
-        for item in thicknessMenu?.items ?? [] {
-            item.state = item.tag == lineWidth.rawValue ? .on : .off
-        }
-        for item in headSizeMenu?.items ?? [] {
-            item.state = item.tag == headSize.rawValue ? .on : .off
-        }
-        thicknessItem?.toolTip = "Arrow thickness: \(lineWidth.title)"
-        headSizeItem?.toolTip = "Arrow head size: \(headSize.title)"
-    }
-
-    @objc private func selectArrowTool() {
-        canvas.activateArrowTool()
+    @objc private func toggleArrowTool(_ sender: Any?) {
+        setArrowToolActive(!canvas.isImageToolActive)
         makeFirstResponder(canvas)
     }
 
-    @objc private func selectLineWidth(_ sender: NSMenuItem) {
-        guard let value = ArrowLineWidth(rawValue: sender.tag) else { return }
-        lineWidth = value
-        ArrowPreferences.lineWidth = value
-        canvas.setLineWidth(value)
-        updateStyleMenuStates()
-        makeFirstResponder(canvas)
-    }
-
-    @objc private func selectHeadSize(_ sender: NSMenuItem) {
-        guard let value = ArrowHeadSize(rawValue: sender.tag) else { return }
-        headSize = value
-        ArrowPreferences.headSize = value
-        canvas.setHeadSize(value)
-        updateStyleMenuStates()
-        makeFirstResponder(canvas)
+    private func setArrowToolActive(_ active: Bool) {
+        canvas.setImageToolActive(active)
+        arrowButton.setActive(active)
     }
 
     @objc func copyScreenshot(_ sender: Any?) {
@@ -360,6 +296,8 @@ final class AnnotationEditorWindow: NSWindow, NSToolbarDelegate, NSWindowDelegat
         }
     }
 
+    // MARK: Keyboard
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.keyCode == 53 {
             if canvas.handleEscape() { return true }
@@ -381,6 +319,8 @@ final class AnnotationEditorWindow: NSWindow, NSToolbarDelegate, NSWindowDelegat
         return super.performKeyEquivalent(with: event)
     }
 
+    // MARK: Window delegate
+
     func windowWillClose(_ notification: Notification) {
         canvas.clear()
         title = "Screenshot"
@@ -401,6 +341,365 @@ final class AnnotationEditorWindow: NSWindow, NSToolbarDelegate, NSWindowDelegat
     }
 }
 
+// MARK: - Editor chrome
+
+@MainActor
+private final class EditorContainerView: NSView {}
+
+@MainActor
+private final class EditorToolStrip: NSView {
+    static let height: CGFloat = 48
+    private static let dividerX: CGFloat = 94
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.setFill()
+        bounds.fill()
+
+        NSColor.separatorColor.setFill()
+        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+        NSRect(x: Self.dividerX, y: 12, width: 1, height: bounds.height - 24).fill()
+    }
+}
+
+// MARK: - Buttons
+
+@MainActor
+private class HoverButton: NSButton {
+    private var trackingArea: NSTrackingArea?
+    private(set) var isHovered = false {
+        didSet { needsDisplay = true }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isBordered = false
+        title = ""
+        focusRingType = .none
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea {
+            removeTrackingArea(trackingArea)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+    }
+}
+
+@MainActor
+private final class ToolStripButton: HoverButton {
+    private(set) var isActive = false {
+        didSet { needsDisplay = true }
+    }
+    private var isPressed = false
+
+    init(symbolName: String, toolTip: String) {
+        super.init(frame: .zero)
+        self.toolTip = toolTip
+        let configuration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+        image = NSImage(systemSymbolName: symbolName, accessibilityDescription: toolTip)?
+            .withSymbolConfiguration(configuration)
+        imageScaling = .scaleProportionallyDown
+        imagePosition = .imageOnly
+        contentTintColor = .labelColor
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func setActive(_ active: Bool) {
+        isActive = active
+    }
+
+    override func highlight(_ flag: Bool) {
+        isPressed = flag
+        needsDisplay = true
+        super.highlight(flag)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isActive || isHovered || isPressed {
+            let color: NSColor
+            if isActive {
+                color = NSColor.controlAccentColor.withAlphaComponent(0.16)
+            } else if isPressed {
+                color = NSColor.labelColor.withAlphaComponent(0.14)
+            } else {
+                color = NSColor.labelColor.withAlphaComponent(0.07)
+            }
+            color.setFill()
+            NSBezierPath(
+                roundedRect: bounds.insetBy(dx: 1, dy: 1),
+                xRadius: 8,
+                yRadius: 8
+            ).fill()
+        }
+        super.draw(dirtyRect)
+    }
+}
+
+@MainActor
+private final class ColorSwatchButton: HoverButton {
+    let arrowColor: ArrowColor
+    private(set) var isSelected = false {
+        didSet { needsDisplay = true }
+    }
+
+    init(color: ArrowColor) {
+        arrowColor = color
+        super.init(frame: .zero)
+        toolTip = color.title
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func setSelected(_ selected: Bool) {
+        isSelected = selected
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isHovered {
+            NSColor.labelColor.withAlphaComponent(0.08).setFill()
+            NSBezierPath(ovalIn: bounds.insetBy(dx: 0.5, dy: 0.5)).fill()
+        }
+
+        let dot = NSBezierPath(ovalIn: bounds.insetBy(dx: 3.5, dy: 3.5))
+        arrowColor.nsColor.setFill()
+        dot.fill()
+        NSColor.separatorColor.setStroke()
+        dot.lineWidth = 1
+        dot.stroke()
+
+        if isSelected {
+            let ring = NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1))
+            NSColor.controlAccentColor.setStroke()
+            ring.lineWidth = 2
+            ring.stroke()
+        }
+    }
+}
+
+@MainActor
+private final class ThicknessButton: HoverButton {
+    let thickness: ArrowLineWidth
+    private(set) var isSelected = false {
+        didSet { needsDisplay = true }
+    }
+
+    init(thickness: ArrowLineWidth) {
+        self.thickness = thickness
+        super.init(frame: .zero)
+        toolTip = "\(thickness.title) arrow"
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func setSelected(_ selected: Bool) {
+        isSelected = selected
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isSelected || isHovered {
+            let color: NSColor = isSelected
+                ? NSColor.controlAccentColor.withAlphaComponent(0.16)
+                : NSColor.labelColor.withAlphaComponent(0.07)
+            color.setFill()
+            NSBezierPath(
+                roundedRect: bounds.insetBy(dx: 1, dy: 1),
+                xRadius: 6,
+                yRadius: 6
+            ).fill()
+        }
+
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: bounds.midX - 8, y: bounds.midY))
+        path.line(to: NSPoint(x: bounds.midX + 8, y: bounds.midY))
+        path.lineWidth = thickness.previewWidth
+        path.lineCapStyle = .round
+        (isSelected ? NSColor.controlAccentColor : NSColor.labelColor).setStroke()
+        path.stroke()
+    }
+}
+
+// MARK: - Options panel
+
+@MainActor
+private final class ArrowOptionsPanel: NSView {
+    private static let swatchSize: CGFloat = 22
+    private static let swatchSpacing: CGFloat = 6
+    private static let thicknessSize: CGFloat = 28
+    private static let thicknessSpacing: CGFloat = 2
+    private static let horizontalPadding: CGFloat = 10
+    private static let dividerGap: CGFloat = 12
+    private static let panelHeight: CGFloat = 44
+
+    var onColorSelected: (@MainActor (ArrowColor) -> Void)?
+    var onThicknessSelected: (@MainActor (ArrowLineWidth) -> Void)?
+
+    private var swatchButtons: [ColorSwatchButton] = []
+    private var thicknessButtons: [ThicknessButton] = []
+
+    override var isFlipped: Bool { false }
+
+    convenience init() {
+        self.init(frame: NSRect(origin: .zero, size: Self.preferredSize))
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        buildSubviews()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    static var preferredSize: NSSize {
+        let swatches = CGFloat(ArrowColor.allCases.count) * swatchSize
+            + CGFloat(ArrowColor.allCases.count - 1) * swatchSpacing
+        let thicknesses = CGFloat(ArrowLineWidth.allCases.count) * thicknessSize
+            + CGFloat(ArrowLineWidth.allCases.count - 1) * thicknessSpacing
+        let width = horizontalPadding * 2 + swatches + dividerGap * 2 + 1 + thicknesses
+        return NSSize(width: width, height: panelHeight)
+    }
+
+    private func buildSubviews() {
+        var x = Self.horizontalPadding
+
+        for color in ArrowColor.allCases {
+            let button = ColorSwatchButton(color: color)
+            button.tag = color.rawValue
+            button.target = self
+            button.action = #selector(selectColor(_:))
+            button.frame = NSRect(
+                x: x,
+                y: (Self.panelHeight - Self.swatchSize) / 2,
+                width: Self.swatchSize,
+                height: Self.swatchSize
+            )
+            addSubview(button)
+            swatchButtons.append(button)
+            x += Self.swatchSize + Self.swatchSpacing
+        }
+
+        x += Self.dividerGap - Self.swatchSpacing
+
+        let divider = NSBox(frame: NSRect(
+            x: x,
+            y: 10,
+            width: 1,
+            height: Self.panelHeight - 20
+        ))
+        divider.boxType = .separator
+        addSubview(divider)
+
+        x += 1 + Self.dividerGap
+
+        for thickness in ArrowLineWidth.allCases {
+            let button = ThicknessButton(thickness: thickness)
+            button.tag = thickness.rawValue
+            button.target = self
+            button.action = #selector(selectThickness(_:))
+            button.frame = NSRect(
+                x: x,
+                y: (Self.panelHeight - Self.thicknessSize) / 2,
+                width: Self.thicknessSize,
+                height: Self.thicknessSize
+            )
+            addSubview(button)
+            thicknessButtons.append(button)
+            x += Self.thicknessSize + Self.thicknessSpacing
+        }
+    }
+
+    func updateSelection(color: ArrowColor, thickness: ArrowLineWidth) {
+        for button in swatchButtons {
+            button.setSelected(button.tag == color.rawValue)
+        }
+        for button in thicknessButtons {
+            button.setSelected(button.tag == thickness.rawValue)
+        }
+    }
+
+    @objc private func selectColor(_ sender: NSButton) {
+        guard let color = ArrowColor(rawValue: sender.tag) else { return }
+        updateSelection(color: color, thickness: currentThicknessFromButtons())
+        onColorSelected?(color)
+    }
+
+    @objc private func selectThickness(_ sender: NSButton) {
+        guard let thickness = ArrowLineWidth(rawValue: sender.tag) else { return }
+        updateSelection(color: currentColorFromButtons(), thickness: thickness)
+        onThicknessSelected?(thickness)
+    }
+
+    private func currentColorFromButtons() -> ArrowColor {
+        guard let tag = swatchButtons.first(where: { $0.isSelected })?.tag,
+              let color = ArrowColor(rawValue: tag) else { return .red }
+        return color
+    }
+
+    private func currentThicknessFromButtons() -> ArrowLineWidth {
+        guard let tag = thicknessButtons.first(where: { $0.isSelected })?.tag,
+              let thickness = ArrowLineWidth(rawValue: tag) else { return .regular }
+        return thickness
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(
+            roundedRect: bounds.insetBy(dx: 1, dy: 1),
+            xRadius: 12,
+            yRadius: 12
+        )
+
+        NSColor.controlBackgroundColor.setFill()
+        path.fill()
+
+        NSColor.separatorColor.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+
+    override func layout() {
+        super.layout()
+        wantsLayer = true
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.18
+        layer?.shadowRadius = 8
+        layer?.shadowOffset = NSSize(width: 0, height: -2)
+        layer?.shadowPath = CGPath(
+            roundedRect: bounds.insetBy(dx: 1, dy: 1),
+            cornerWidth: 12,
+            cornerHeight: 12,
+            transform: nil
+        )
+    }
+}
+
 // MARK: - Canvas
 
 @MainActor
@@ -408,6 +707,8 @@ private final class AnnotationCanvasView: NSView {
     private struct Arrow {
         var start: CGPoint
         var end: CGPoint
+        var color: ArrowColor
+        var thickness: ArrowLineWidth
     }
 
     private enum DragMode {
@@ -425,6 +726,7 @@ private final class AnnotationCanvasView: NSView {
 
     private let handleRadius: CGFloat = 6
     private let minimumDragDistance: CGFloat = 4
+    private let optionsMargin: CGFloat = 20
 
     private var screenshot: CGImage?
     private var screenshotImage: NSImage?
@@ -432,12 +734,49 @@ private final class AnnotationCanvasView: NSView {
     private var selectedArrowIndex: Int?
     private var dragMode: DragMode?
     private var pointerPosition: CGPoint?
-    private var lineWidthSetting: ArrowLineWidth = .regular
-    private var headSizeSetting: ArrowHeadSize = .medium
+    private var currentColor = ArrowPreferences.color
+    private var currentThickness = ArrowPreferences.lineWidth
     private var trackingArea: NSTrackingArea?
+    private let optionsPanel = ArrowOptionsPanel()
+
+    /// View transform: `cameraCenter` is the content point at the viewport
+    /// center, and `cameraScale` is view points per content unit. Content is
+    /// the original screenshot plus every annotation. See `fitCameraToContent`.
+    private var cameraCenter: CGPoint = .zero
+    private var cameraScale: CGFloat = 1
+    private var hasCamera = false
+    private let minimumCameraScale: CGFloat = 0.02
+    private let maximumCameraScale: CGFloat = 4
+
+    /// True once the user pans or zooms by hand. Auto-fit stops overriding the
+    /// camera on mouse-up until the content itself changes.
+    private var isManuallyAdjusted = false
+    private var dragStartContentBounds: CGRect = .zero
+    private var lastLayoutSize: CGSize = .zero
+
+    private(set) var isImageToolActive = true
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        optionsPanel.isHidden = true
+        optionsPanel.onColorSelected = { [weak self] color in
+            self?.applyColor(color)
+        }
+        optionsPanel.onThicknessSelected = { [weak self] thickness in
+            self?.applyThickness(thickness)
+        }
+        optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        addSubview(optionsPanel)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    // MARK: Content
 
     func setImage(_ image: CGImage) {
         screenshot = image
@@ -445,10 +784,16 @@ private final class AnnotationCanvasView: NSView {
             cgImage: image,
             size: NSSize(width: image.width, height: image.height)
         )
+        currentColor = ArrowPreferences.color
+        currentThickness = ArrowPreferences.lineWidth
         arrows.removeAll()
         selectedArrowIndex = nil
         dragMode = nil
         pointerPosition = nil
+        hasCamera = false
+        optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        updateOptionsVisibility(animated: false)
+        fitCameraToContent()
         needsDisplay = true
     }
 
@@ -459,73 +804,75 @@ private final class AnnotationCanvasView: NSView {
         selectedArrowIndex = nil
         dragMode = nil
         pointerPosition = nil
+        hasCamera = false
+        updateOptionsVisibility(animated: false)
         needsDisplay = true
     }
 
-    func setLineWidth(_ value: ArrowLineWidth) {
-        lineWidthSetting = value
-        needsDisplay = true
-    }
-
-    func setHeadSize(_ value: ArrowHeadSize) {
-        headSizeSetting = value
-        needsDisplay = true
-    }
-
-    func activateArrowTool() {
-        selectedArrowIndex = nil
-        dragMode = nil
-        pointerPosition = nil
-        needsDisplay = true
-    }
-
-    /// Handles Esc: first an in-progress drag, then the current selection.
-    /// Returns false when there is nothing left to cancel.
-    @discardableResult
-    func handleEscape() -> Bool {
-        if dragMode != nil {
+    func setImageToolActive(_ active: Bool) {
+        isImageToolActive = active
+        if !active {
             dragMode = nil
             pointerPosition = nil
-            needsDisplay = true
-            return true
-        }
-        if selectedArrowIndex != nil {
             selectedArrowIndex = nil
+            optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
             needsDisplay = true
-            return true
         }
-        return false
     }
 
-    @discardableResult
-    func deleteSelectedArrow() -> Bool {
-        guard let index = selectedArrowIndex, arrows.indices.contains(index) else { return false }
-        arrows.remove(at: index)
-        selectedArrowIndex = nil
-        needsDisplay = true
-        return true
+    // MARK: Layout
+
+    override func layout() {
+        super.layout()
+        let size = optionsPanel.frame.size
+        let x = max(optionsMargin, bounds.width - size.width - optionsMargin)
+        optionsPanel.frame = NSRect(
+            x: x,
+            y: optionsMargin,
+            width: size.width,
+            height: size.height
+        )
+
+        // Re-fit only when the viewport actually changes size, so a manual
+        // zoom or pan is not undone by unrelated layout passes. While dragging,
+        // the camera is kept anchored for a smooth zoom-out.
+        let sizeChanged = bounds.size != lastLayoutSize
+        lastLayoutSize = bounds.size
+        if screenshot != nil, dragMode == nil, sizeChanged {
+            fitCameraToContent()
+        }
     }
 
     // MARK: Drawing
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.windowBackgroundColor.setFill()
-        bounds.fill()
+        drawWorkArea()
 
         guard let screenshot, let screenshotImage else { return }
-        screenshotImage.draw(in: imageRect)
+        ensureCamera()
+        let destination = imageRect
+        screenshotImage.draw(in: destination)
 
-        let style = imageStyle(for: screenshot)
-        let scale = imageScale(for: screenshot)
-        let viewLineWidth = style.lineWidth * scale
-        let viewHeadLength = style.headLength * scale
+        NSColor.black.withAlphaComponent(0.18).setStroke()
+        let border = NSBezierPath(rect: destination.insetBy(dx: -0.5, dy: -0.5))
+        border.lineWidth = 1
+        border.stroke()
+
+        let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
+        let scale = cameraScale
 
         for (index, arrow) in arrows.enumerated() {
+            let lineWidth = ArrowGeometry.lineWidth(
+                forImageSize: imageSize,
+                thickness: arrow.thickness
+            )
+            let headLength = ArrowGeometry.headLength(forLineWidth: lineWidth)
             drawArrow(
-                from: viewPoint(for: arrow.start),
-                to: viewPoint(for: arrow.end),
-                lineWidth: viewLineWidth,
-                headLength: viewHeadLength
+                from: contentToView(arrow.start),
+                to: contentToView(arrow.end),
+                lineWidth: lineWidth * scale,
+                headLength: headLength * scale,
+                color: arrow.color.nsColor
             )
             if index == selectedArrowIndex {
                 drawHandles(for: arrow)
@@ -533,28 +880,60 @@ private final class AnnotationCanvasView: NSView {
         }
 
         if case .drawing(let start)? = dragMode, let pointerPosition {
+            let lineWidth = ArrowGeometry.lineWidth(
+                forImageSize: imageSize,
+                thickness: currentThickness
+            )
+            let headLength = ArrowGeometry.headLength(forLineWidth: lineWidth)
             drawArrow(
-                from: viewPoint(for: start),
-                to: viewPoint(for: pointerPosition),
-                lineWidth: viewLineWidth,
-                headLength: viewHeadLength
+                from: contentToView(start),
+                to: contentToView(pointerPosition),
+                lineWidth: lineWidth * scale,
+                headLength: headLength * scale,
+                color: currentColor.nsColor
             )
         }
     }
 
-    private func drawArrow(from start: CGPoint, to end: CGPoint, lineWidth: CGFloat, headLength: CGFloat) {
+    private func drawWorkArea() {
+        NSColor.controlBackgroundColor.setFill()
+        bounds.fill()
+
+        let tile: CGFloat = 12
+        NSColor.labelColor.withAlphaComponent(0.07).setFill()
+        let columns = Int(ceil(bounds.width / tile))
+        let rows = Int(ceil(bounds.height / tile))
+        for row in 0..<rows {
+            for column in 0..<columns where (row + column) % 2 == 0 {
+                NSRect(
+                    x: bounds.minX + CGFloat(column) * tile,
+                    y: bounds.minY + CGFloat(row) * tile,
+                    width: tile,
+                    height: tile
+                ).fill()
+            }
+        }
+    }
+
+    private func drawArrow(
+        from start: CGPoint,
+        to end: CGPoint,
+        lineWidth: CGFloat,
+        headLength: CGFloat,
+        color: NSColor
+    ) {
         let path = ArrowGeometry.path(
             from: start,
             to: end,
             lineWidth: lineWidth,
             headLength: headLength
         )
-        NSColor.systemRed.setStroke()
+        color.setStroke()
         path.stroke()
     }
 
     private func drawHandles(for arrow: Arrow) {
-        for point in [viewPoint(for: arrow.start), viewPoint(for: arrow.end)] {
+        for point in [contentToView(arrow.start), contentToView(arrow.end)] {
             let rect = NSRect(
                 x: point.x - handleRadius,
                 y: point.y - handleRadius,
@@ -564,7 +943,7 @@ private final class AnnotationCanvasView: NSView {
             let path = NSBezierPath(ovalIn: rect)
             NSColor.white.setFill()
             path.fill()
-            NSColor.systemRed.setStroke()
+            arrow.color.nsColor.setStroke()
             path.lineWidth = 2
             path.stroke()
         }
@@ -573,48 +952,57 @@ private final class AnnotationCanvasView: NSView {
     // MARK: Mouse handling
 
     override func mouseDown(with event: NSEvent) {
-        let viewPoint = convert(event.locationInWindow, from: nil)
-        guard screenshot != nil, let imagePoint = imagePoint(for: viewPoint) else {
+        ensureCamera()
+        let pointInView = convert(event.locationInWindow, from: nil)
+        guard screenshot != nil, let contentPoint = clampedContentPoint(for: pointInView) else {
             selectedArrowIndex = nil
             dragMode = nil
             needsDisplay = true
             return
         }
 
-        if let target = hitTest(at: viewPoint) {
+        dragStartContentBounds = contentBounds
+
+        if let target = hitTest(at: pointInView) {
             switch target {
             case .start(let index):
-                selectedArrowIndex = index
+                selectArrow(at: index)
                 dragMode = .resizingStart(index: index)
             case .end(let index):
-                selectedArrowIndex = index
+                selectArrow(at: index)
                 dragMode = .resizingEnd(index: index)
             case .body(let index):
                 let arrow = arrows[index]
-                selectedArrowIndex = index
+                selectArrow(at: index)
                 dragMode = .moving(
                     index: index,
                     original: arrow,
                     grabOffset: CGPoint(
-                        x: imagePoint.x - arrow.start.x,
-                        y: imagePoint.y - arrow.start.y
+                        x: contentPoint.x - arrow.start.x,
+                        y: contentPoint.y - arrow.start.y
                     )
                 )
             }
             NSCursor.closedHand.set()
+        } else if isImageToolActive {
+            selectedArrowIndex = nil
+            optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+            dragMode = .drawing(start: contentPoint)
+            pointerPosition = contentPoint
+            NSCursor.crosshair.set()
         } else {
             selectedArrowIndex = nil
-            dragMode = .drawing(start: imagePoint)
-            pointerPosition = imagePoint
-            NSCursor.crosshair.set()
+            dragMode = nil
+            optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+            NSCursor.arrow.set()
         }
         needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let screenshot, let mode = dragMode else { return }
-        let viewPoint = convert(event.locationInWindow, from: nil)
-        guard let point = clampedImagePoint(for: viewPoint) else { return }
+        guard let mode = dragMode else { return }
+        let pointInView = clampedViewPoint(convert(event.locationInWindow, from: nil))
+        guard let point = clampedContentPoint(for: pointInView) else { return }
 
         switch mode {
         case .drawing:
@@ -627,12 +1015,13 @@ private final class AnnotationCanvasView: NSView {
             var dx = proposedStart.x - original.start.x
             var dy = proposedStart.y - original.start.y
 
+            let limits = visibleContentRect
             let minX = min(original.start.x, original.end.x)
             let maxX = max(original.start.x, original.end.x)
             let minY = min(original.start.y, original.end.y)
             let maxY = max(original.start.y, original.end.y)
-            dx = min(max(dx, -minX), CGFloat(screenshot.width) - maxX)
-            dy = min(max(dy, -minY), CGFloat(screenshot.height) - maxY)
+            dx = min(max(dx, limits.minX - minX), limits.maxX - maxX)
+            dy = min(max(dy, limits.minY - minY), limits.maxY - maxY)
 
             arrows[index].start = CGPoint(x: original.start.x + dx, y: original.start.y + dy)
             arrows[index].end = CGPoint(x: original.end.x + dx, y: original.end.y + dy)
@@ -641,6 +1030,10 @@ private final class AnnotationCanvasView: NSView {
         case .resizingEnd(let index):
             arrows[index].end = point
         }
+
+        // If the content outgrows the viewport, zoom out under the pointer so
+        // there is always more checkerboard to draw into.
+        expandCameraIfNeeded(anchoredAt: pointInView)
         needsDisplay = true
     }
 
@@ -648,21 +1041,82 @@ private final class AnnotationCanvasView: NSView {
         guard let mode = dragMode else { return }
         dragMode = nil
 
-        let pointInView = convert(event.locationInWindow, from: nil)
+        let pointInView = clampedViewPoint(convert(event.locationInWindow, from: nil))
         if case .drawing(let start) = mode,
-           let end = clampedImagePoint(for: pointInView) {
-            let startInView = viewPoint(for: start)
-            let endInView = viewPoint(for: end)
+           let end = clampedContentPoint(for: pointInView) {
+            let startInView = contentToView(start)
+            let endInView = contentToView(end)
             if distance(from: startInView, to: endInView) >= minimumDragDistance {
-                arrows.append(Arrow(start: start, end: end))
+                arrows.append(Arrow(
+                    start: start,
+                    end: end,
+                    color: currentColor,
+                    thickness: currentThickness
+                ))
                 selectedArrowIndex = arrows.count - 1
+                updateOptionsVisibility()
             } else {
                 selectedArrowIndex = nil
             }
         }
 
         pointerPosition = nil
+        let contentChanged = contentBounds != dragStartContentBounds
+        if contentChanged || !isManuallyAdjusted {
+            fitCameraToContent()
+        }
         updateCursor(at: pointInView)
+        needsDisplay = true
+    }
+
+    // MARK: Zooming and panning
+
+    override func magnify(with event: NSEvent) {
+        guard screenshot != nil else { return }
+        let pointInView = convert(event.locationInWindow, from: nil)
+        zoom(by: 1 + event.magnification, around: pointInView)
+    }
+
+    /// Two-finger double-tap (smart zoom) returns to the fitted view.
+    override func smartMagnify(with event: NSEvent) {
+        guard screenshot != nil else { return }
+        fitCameraToContent()
+        needsDisplay = true
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard screenshot != nil else { return }
+        ensureCamera()
+        let pointInView = convert(event.locationInWindow, from: nil)
+        if event.modifierFlags.contains(.command) {
+            let factor = CGFloat(exp(Double(event.scrollingDeltaY) * 0.01))
+            zoom(by: factor, around: pointInView)
+        } else {
+            // Two-finger scroll pans the content while keeping the
+            // checkerboard fixed to the window.
+            cameraCenter.x -= event.scrollingDeltaX / cameraScale
+            cameraCenter.y -= event.scrollingDeltaY / cameraScale
+            isManuallyAdjusted = true
+            needsDisplay = true
+        }
+    }
+
+    private func zoom(by factor: CGFloat, around pointInView: CGPoint) {
+        guard screenshot != nil, factor.isFinite, factor > 0 else { return }
+        ensureCamera()
+        let anchor = viewToContent(pointInView)
+        let newScale = min(
+            max(cameraScale * factor, minimumCameraScale),
+            maximumCameraScale
+        )
+        guard abs(newScale - cameraScale) > 0.0001 else { return }
+
+        cameraScale = newScale
+        cameraCenter = CGPoint(
+            x: anchor.x - (pointInView.x - bounds.midX) / cameraScale,
+            y: anchor.y - (pointInView.y - bounds.midY) / cameraScale
+        )
+        isManuallyAdjusted = true
         needsDisplay = true
     }
 
@@ -695,16 +1149,99 @@ private final class AnnotationCanvasView: NSView {
         NSCursor.crosshair.set()
     }
 
-    private func updateCursor(at viewPoint: CGPoint) {
+    private func updateCursor(at pointInView: CGPoint) {
         guard dragMode == nil else { return }
-        if imagePoint(for: viewPoint) != nil, hitTest(at: viewPoint) != nil {
+        if hitTest(at: pointInView) != nil {
             NSCursor.openHand.set()
-        } else {
+        } else if isImageToolActive {
             NSCursor.crosshair.set()
+        } else {
+            NSCursor.arrow.set()
+        }
+    }
+
+    // MARK: Selection and style
+
+    private func selectArrow(at index: Int) {
+        guard arrows.indices.contains(index) else { return }
+        selectedArrowIndex = index
+        let arrow = arrows[index]
+        currentColor = arrow.color
+        currentThickness = arrow.thickness
+        optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+    }
+
+    private func applyColor(_ color: ArrowColor) {
+        currentColor = color
+        ArrowPreferences.color = color
+        if let index = selectedArrowIndex, arrows.indices.contains(index) {
+            arrows[index].color = color
+        }
+        needsDisplay = true
+        window?.makeFirstResponder(self)
+    }
+
+    private func applyThickness(_ thickness: ArrowLineWidth) {
+        currentThickness = thickness
+        ArrowPreferences.lineWidth = thickness
+        if let index = selectedArrowIndex, arrows.indices.contains(index) {
+            arrows[index].thickness = thickness
+        }
+        needsDisplay = true
+        window?.makeFirstResponder(self)
+    }
+
+    private func updateOptionsVisibility(animated: Bool = true) {
+        let shouldShow = !arrows.isEmpty
+        if shouldShow {
+            guard optionsPanel.isHidden else { return }
+            optionsPanel.isHidden = false
+            if animated {
+                optionsPanel.alphaValue = 0
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.15
+                    optionsPanel.animator().alphaValue = 1
+                }
+            } else {
+                optionsPanel.alphaValue = 1
+            }
+        } else {
+            optionsPanel.isHidden = true
+            optionsPanel.alphaValue = 1
         }
     }
 
     // MARK: Keyboard
+
+    /// Handles Esc: first an in-progress drag, then the current selection.
+    /// Returns false when there is nothing left to cancel.
+    @discardableResult
+    func handleEscape() -> Bool {
+        if dragMode != nil {
+            dragMode = nil
+            pointerPosition = nil
+            needsDisplay = true
+            return true
+        }
+        if selectedArrowIndex != nil {
+            selectedArrowIndex = nil
+            optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+            needsDisplay = true
+            return true
+        }
+        return false
+    }
+
+    @discardableResult
+    private func deleteSelectedArrow() -> Bool {
+        guard let index = selectedArrowIndex, arrows.indices.contains(index) else { return false }
+        arrows.remove(at: index)
+        selectedArrowIndex = nil
+        optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        updateOptionsVisibility()
+        needsDisplay = true
+        return true
+    }
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 {
@@ -716,6 +1253,27 @@ private final class AnnotationCanvasView: NSView {
 
         if event.keyCode == 51 || event.keyCode == 117 {
             if deleteSelectedArrow() { return }
+        }
+
+        if event.modifierFlags.contains(.command),
+           let key = event.charactersIgnoringModifiers {
+            let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+            if modifiers == .command || modifiers == [.command, .shift] {
+                switch key {
+                case "+", "=":
+                    zoom(by: 1.25, around: viewportCenter)
+                    return
+                case "-", "_":
+                    zoom(by: 0.8, around: viewportCenter)
+                    return
+                case "0":
+                    fitCameraToContent()
+                    needsDisplay = true
+                    return
+                default:
+                    break
+                }
+            }
         }
 
         if event.modifierFlags.contains(.command) {
@@ -731,13 +1289,14 @@ private final class AnnotationCanvasView: NSView {
 
     private func hitTest(at point: CGPoint) -> HitTarget? {
         guard let screenshot else { return nil }
-        let style = imageStyle(for: screenshot)
-        let bodyTolerance = max(6, style.lineWidth * imageScale(for: screenshot) * 2.5)
+        ensureCamera()
+        let scale = cameraScale
+        let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
         let endpointTolerance = handleRadius + 3
 
         for index in arrows.indices.reversed() {
-            let start = viewPoint(for: arrows[index].start)
-            let end = viewPoint(for: arrows[index].end)
+            let start = contentToView(arrows[index].start)
+            let end = contentToView(arrows[index].end)
             if distance(from: point, to: end) <= endpointTolerance {
                 return .end(index)
             }
@@ -747,8 +1306,13 @@ private final class AnnotationCanvasView: NSView {
         }
 
         for index in arrows.indices.reversed() {
-            let start = viewPoint(for: arrows[index].start)
-            let end = viewPoint(for: arrows[index].end)
+            let lineWidth = ArrowGeometry.lineWidth(
+                forImageSize: imageSize,
+                thickness: arrows[index].thickness
+            )
+            let bodyTolerance = max(6, lineWidth * scale * 2.5)
+            let start = contentToView(arrows[index].start)
+            let end = contentToView(arrows[index].end)
             if distance(from: point, toSegmentFrom: start, to: end) <= bodyTolerance {
                 return .body(index)
             }
@@ -773,60 +1337,163 @@ private final class AnnotationCanvasView: NSView {
         return distance(from: point, to: projection)
     }
 
-    // MARK: Geometry
+    // MARK: Camera and geometry
+
+    /// Content is the screenshot plus every annotation, with the arrow stroke
+    /// and head included.
+    private var contentBounds: CGRect {
+        guard let screenshot else { return .zero }
+        let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
+        var bounds = CGRect(origin: .zero, size: imageSize)
+        for arrow in arrows {
+            bounds = bounds.union(arrowBounds(for: arrow, imageSize: imageSize))
+        }
+        return bounds
+    }
+
+    /// Includes the arrow currently being dragged out, before it is committed.
+    private var contentBoundsForCamera: CGRect {
+        guard let screenshot else { return .zero }
+        var bounds = contentBounds
+        if case .drawing(let start)? = dragMode, let pointerPosition {
+            let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
+            bounds = bounds.union(arrowBounds(
+                for: Arrow(
+                    start: start,
+                    end: pointerPosition,
+                    color: currentColor,
+                    thickness: currentThickness
+                ),
+                imageSize: imageSize
+            ))
+        }
+        return bounds
+    }
+
+    /// Hard limit for how far annotations can be drawn from the image. Keeps
+    /// accidental endless zoom-outs from producing enormous exports.
+    private var allowedContentRect: CGRect {
+        guard let screenshot else { return .zero }
+        let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
+        let padding = max(2048, max(imageSize.width, imageSize.height))
+        return CGRect(
+            x: -padding,
+            y: -padding,
+            width: imageSize.width + padding * 2,
+            height: imageSize.height + padding * 2
+        )
+    }
+
+    /// Checkerboard border kept around the content, in view points.
+    private var viewportMargin: CGFloat {
+        max(48, min(bounds.width, bounds.height) * 0.12)
+    }
+
+    private func fittedScale(for content: CGRect) -> CGFloat {
+        guard content.width > 0, content.height > 0 else { return 1 }
+        let margin = viewportMargin
+        let availableWidth = max(1, bounds.width - margin * 2)
+        let availableHeight = max(1, bounds.height - margin * 2)
+        let scale = min(availableWidth / content.width, availableHeight / content.height)
+        // Never magnify image pixels beyond 1:1. Small captures simply get a
+        // larger checkerboard area around them.
+        return min(scale, 1)
+    }
+
+    /// Fits the content into the viewport with a border on every side.
+    private func fitCameraToContent() {
+        guard screenshot != nil, bounds.width > 1, bounds.height > 1 else { return }
+        let content = contentBoundsForCamera
+        guard content.width > 0, content.height > 0 else { return }
+        cameraScale = max(minimumCameraScale, fittedScale(for: content))
+        cameraCenter = CGPoint(x: content.midX, y: content.midY)
+        hasCamera = true
+        isManuallyAdjusted = false
+    }
+
+    /// Zooms out (never in) while the pointer keeps its content position, so
+    /// dragging past the edge grows the canvas instead of hitting a wall.
+    /// Manual zoom/pan is left alone; mouse-up refits if the content grew.
+    private func expandCameraIfNeeded(anchoredAt pointInView: CGPoint) {
+        guard screenshot != nil, !isManuallyAdjusted else { return }
+        let content = contentBoundsForCamera
+        let newScale = fittedScale(for: content)
+        guard newScale < cameraScale else { return }
+
+        let anchor = viewToContent(pointInView)
+        cameraScale = max(0.01, newScale)
+        cameraCenter = CGPoint(
+            x: anchor.x - (pointInView.x - bounds.midX) / cameraScale,
+            y: anchor.y - (pointInView.y - bounds.midY) / cameraScale
+        )
+        hasCamera = true
+    }
+
+    private func ensureCamera() {
+        if !hasCamera {
+            fitCameraToContent()
+        }
+    }
+
+    private var viewportCenter: CGPoint {
+        CGPoint(x: bounds.midX, y: bounds.midY)
+    }
+
+    private func contentToView(_ point: CGPoint) -> CGPoint {
+        CGPoint(
+            x: viewportCenter.x + (point.x - cameraCenter.x) * cameraScale,
+            y: viewportCenter.y + (point.y - cameraCenter.y) * cameraScale
+        )
+    }
+
+    private func viewToContent(_ point: CGPoint) -> CGPoint {
+        CGPoint(
+            x: cameraCenter.x + (point.x - viewportCenter.x) / cameraScale,
+            y: cameraCenter.y + (point.y - viewportCenter.y) / cameraScale
+        )
+    }
 
     private var imageRect: CGRect {
         guard let screenshot else { return .zero }
-        let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
-        let scale = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
-        let fitted = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        let origin = contentToView(.zero)
         return CGRect(
-            x: (bounds.width - fitted.width) / 2,
-            y: (bounds.height - fitted.height) / 2,
-            width: fitted.width,
-            height: fitted.height
+            x: origin.x,
+            y: origin.y,
+            width: CGFloat(screenshot.width) * cameraScale,
+            height: CGFloat(screenshot.height) * cameraScale
         )
     }
 
-    private func imageScale(for screenshot: CGImage) -> CGFloat {
-        guard screenshot.width > 0 else { return 1 }
-        return imageRect.width / CGFloat(screenshot.width)
-    }
-
-    private func imageStyle(for screenshot: CGImage) -> (lineWidth: CGFloat, headLength: CGFloat) {
-        let size = CGSize(width: screenshot.width, height: screenshot.height)
-        let lineWidth = ArrowGeometry.lineWidth(forImageSize: size, thickness: lineWidthSetting)
-        let headLength = ArrowGeometry.headLength(forLineWidth: lineWidth, headSize: headSizeSetting)
-        return (lineWidth, headLength)
-    }
-
-    private func imagePoint(for viewPoint: CGPoint) -> CGPoint? {
-        guard let screenshot else { return nil }
-        let rect = imageRect
-        guard rect.contains(viewPoint) else { return nil }
-        return CGPoint(
-            x: (viewPoint.x - rect.minX) * CGFloat(screenshot.width) / rect.width,
-            y: (viewPoint.y - rect.minY) * CGFloat(screenshot.height) / rect.height
+    /// Visible canvas expressed in content coordinates.
+    private var visibleContentRect: CGRect {
+        let topLeft = viewToContent(CGPoint(x: bounds.minX, y: bounds.minY))
+        let bottomRight = viewToContent(CGPoint(x: bounds.maxX, y: bounds.maxY))
+        return CGRect(
+            x: min(topLeft.x, bottomRight.x),
+            y: min(topLeft.y, bottomRight.y),
+            width: abs(bottomRight.x - topLeft.x),
+            height: abs(bottomRight.y - topLeft.y)
         )
     }
 
-    private func clampedImagePoint(for viewPoint: CGPoint) -> CGPoint? {
-        guard let screenshot else { return nil }
-        let rect = imageRect
-        let x = min(max(viewPoint.x, rect.minX), rect.maxX)
-        let y = min(max(viewPoint.y, rect.minY), rect.maxY)
-        return CGPoint(
-            x: (x - rect.minX) * CGFloat(screenshot.width) / rect.width,
-            y: (y - rect.minY) * CGFloat(screenshot.height) / rect.height
+    private func clampedViewPoint(_ point: CGPoint) -> CGPoint {
+        CGPoint(
+            x: min(max(point.x, bounds.minX), bounds.maxX),
+            y: min(max(point.y, bounds.minY), bounds.maxY)
         )
     }
 
-    private func viewPoint(for imagePoint: CGPoint) -> CGPoint {
-        guard let screenshot else { return .zero }
-        let rect = imageRect
+    /// Converts a canvas point to content coordinates, clamped to the hard
+    /// drawing limits. Points outside the image but inside the grey area are
+    /// valid and produce negative or oversized coordinates.
+    private func clampedContentPoint(for pointInView: CGPoint) -> CGPoint? {
+        guard screenshot != nil else { return nil }
+        ensureCamera()
+        let contentPoint = viewToContent(clampedViewPoint(pointInView))
+        let limits = allowedContentRect
         return CGPoint(
-            x: rect.minX + imagePoint.x * rect.width / CGFloat(screenshot.width),
-            y: rect.minY + imagePoint.y * rect.height / CGFloat(screenshot.height)
+            x: min(max(contentPoint.x, limits.minX), limits.maxX),
+            y: min(max(contentPoint.y, limits.minY), limits.maxY)
         )
     }
 
@@ -844,36 +1511,64 @@ private final class AnnotationCanvasView: NSView {
 
     private func renderCGImage() -> CGImage? {
         guard let screenshot else { return nil }
-        let width = screenshot.width
-        let height = screenshot.height
+        let imageWidth = screenshot.width
+        let imageHeight = screenshot.height
+        guard imageWidth > 0, imageHeight > 0 else { return nil }
+
+        let imageSize = CGSize(width: imageWidth, height: imageHeight)
+        var exportBounds = CGRect(
+            x: 0,
+            y: 0,
+            width: CGFloat(imageWidth),
+            height: CGFloat(imageHeight)
+        )
+        for arrow in arrows {
+            exportBounds = exportBounds.union(arrowBounds(for: arrow, imageSize: imageSize))
+        }
+
+        let originX = floor(exportBounds.minX)
+        let originY = floor(exportBounds.minY)
+        let exportWidth = max(1, Int(ceil(exportBounds.maxX) - originX))
+        let exportHeight = max(1, Int(ceil(exportBounds.maxY) - originY))
+
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
               let context = CGContext(
                   data: nil,
-                  width: width,
-                  height: height,
+                  width: exportWidth,
+                  height: exportHeight,
                   bitsPerComponent: 8,
                   bytesPerRow: 0,
                   space: colorSpace,
                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
               ) else { return nil }
 
-        let imageBounds = CGRect(x: 0, y: 0, width: width, height: height)
+        // The image keeps its pixel position inside the expanded canvas. The
+        // added area stays transparent, matching the editor's checkerboard.
         context.interpolationQuality = .high
-        context.draw(screenshot, in: imageBounds)
+        context.draw(screenshot, in: CGRect(
+            x: -originX,
+            y: CGFloat(exportHeight) + originY - CGFloat(imageHeight),
+            width: CGFloat(imageWidth),
+            height: CGFloat(imageHeight)
+        ))
 
-        let style = imageStyle(for: screenshot)
-        let strokeColor = (NSColor.systemRed.usingColorSpace(.sRGB) ?? NSColor.systemRed).cgColor
-        context.setStrokeColor(strokeColor)
-        context.setLineWidth(style.lineWidth)
         context.setLineCap(.round)
         context.setLineJoin(.round)
 
         for arrow in arrows {
+            let lineWidth = ArrowGeometry.lineWidth(
+                forImageSize: imageSize,
+                thickness: arrow.thickness
+            )
+            let headLength = ArrowGeometry.headLength(forLineWidth: lineWidth)
+            context.setStrokeColor(arrow.color.cgColor)
+            context.setLineWidth(lineWidth)
+
             let path = ArrowGeometry.path(
-                from: flipped(arrow.start, imageHeight: height),
-                to: flipped(arrow.end, imageHeight: height),
-                lineWidth: style.lineWidth,
-                headLength: style.headLength
+                from: exportPoint(arrow.start, originX: originX, originY: originY, exportHeight: exportHeight),
+                to: exportPoint(arrow.end, originX: originX, originY: originY, exportHeight: exportHeight),
+                lineWidth: lineWidth,
+                headLength: headLength
             )
             context.addPath(path.cgPath)
             context.strokePath()
@@ -882,7 +1577,29 @@ private final class AnnotationCanvasView: NSView {
         return context.makeImage()
     }
 
-    private func flipped(_ point: CGPoint, imageHeight: Int) -> CGPoint {
-        CGPoint(x: point.x, y: CGFloat(imageHeight) - point.y)
+    /// Bounds of an arrow including its stroke and arrowhead, in image units.
+    private func arrowBounds(for arrow: Arrow, imageSize: CGSize) -> CGRect {
+        let lineWidth = ArrowGeometry.lineWidth(forImageSize: imageSize, thickness: arrow.thickness)
+        let headLength = ArrowGeometry.headLength(forLineWidth: lineWidth)
+        let path = ArrowGeometry.path(
+            from: arrow.start,
+            to: arrow.end,
+            lineWidth: lineWidth,
+            headLength: headLength
+        )
+        let strokePadding = lineWidth / 2 + 1
+        return path.bounds.insetBy(dx: -strokePadding, dy: -strokePadding)
+    }
+
+    private func exportPoint(
+        _ point: CGPoint,
+        originX: CGFloat,
+        originY: CGFloat,
+        exportHeight: Int
+    ) -> CGPoint {
+        CGPoint(
+            x: point.x - originX,
+            y: CGFloat(exportHeight) + originY - point.y
+        )
     }
 }
