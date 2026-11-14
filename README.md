@@ -23,17 +23,15 @@ selected arrow.
 The canvas has a checkerboard work area around the image, so arrows can start
 or end outside the capture. The image and the arrows together are treated as
 the content: they are fitted at up to 1:1 into the window with a checkerboard
-border on every side. Smaller captures therefore get a larger grey area, and
-when an arrow reaches past the edge the canvas zooms out to keep a border
-around the content, with the drag anchored to the pointer. On release the view
-re-centers on the content. This zoom is visual only; Copy and Save always use
-the content's real pixel size regardless of the zoom level.
+border on every side. Smaller captures therefore get a larger grey area. The
+zoom then stays wherever you put it; adding or moving arrows never zooms the
+view. This zoom is visual only; Copy and Save always use the content's real
+pixel size regardless of the zoom level.
 
 To zoom manually, pinch on a trackpad or hold **⌘** and scroll; the content
 zooms around the pointer. Two-finger scroll pans when you need to reach another
-part of the canvas. Press **⌘0** (or two-finger double-tap) to fit the content
-again. While you are zoomed in, drawing inside the image keeps your zoom; if a
-new arrow makes the content larger, releasing the mouse refits it with a border.
+part of the canvas. Press **⌘0** (or two-finger double-tap) to fit all content,
+including arrows that extend into the grey area, with a border again.
 
 After the first arrow, an options panel appears at the top-right with color
 swatches and line thickness buttons. Changes apply to the selected arrow (or to

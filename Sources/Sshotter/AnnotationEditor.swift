@@ -748,12 +748,6 @@ private final class AnnotationCanvasView: NSView {
     private let minimumCameraScale: CGFloat = 0.02
     private let maximumCameraScale: CGFloat = 4
 
-    /// True once the user pans or zooms by hand. Auto-fit stops overriding the
-    /// camera on mouse-up until the content itself changes.
-    private var isManuallyAdjusted = false
-    private var dragStartContentBounds: CGRect = .zero
-    private var lastLayoutSize: CGSize = .zero
-
     private(set) var isImageToolActive = true
 
     override var isFlipped: Bool { true }
@@ -833,12 +827,10 @@ private final class AnnotationCanvasView: NSView {
             height: size.height
         )
 
-        // Re-fit only when the viewport actually changes size, so a manual
-        // zoom or pan is not undone by unrelated layout passes. While dragging,
-        // the camera is kept anchored for a smooth zoom-out.
-        let sizeChanged = bounds.size != lastLayoutSize
-        lastLayoutSize = bounds.size
-        if screenshot != nil, dragMode == nil, sizeChanged {
+        // Fit once, as soon as the canvas has a real size. After that the
+        // camera only moves through manual zoom/pan or an explicit fit, so
+        // resizing the window or adding arrows never changes the zoom.
+        if screenshot != nil, !hasCamera {
             fitCameraToContent()
         }
     }
@@ -961,8 +953,6 @@ private final class AnnotationCanvasView: NSView {
             return
         }
 
-        dragStartContentBounds = contentBounds
-
         if let target = hitTest(at: pointInView) {
             switch target {
             case .start(let index):
@@ -1031,9 +1021,6 @@ private final class AnnotationCanvasView: NSView {
             arrows[index].end = point
         }
 
-        // If the content outgrows the viewport, zoom out under the pointer so
-        // there is always more checkerboard to draw into.
-        expandCameraIfNeeded(anchoredAt: pointInView)
         needsDisplay = true
     }
 
@@ -1061,10 +1048,6 @@ private final class AnnotationCanvasView: NSView {
         }
 
         pointerPosition = nil
-        let contentChanged = contentBounds != dragStartContentBounds
-        if contentChanged || !isManuallyAdjusted {
-            fitCameraToContent()
-        }
         updateCursor(at: pointInView)
         needsDisplay = true
     }
@@ -1096,7 +1079,6 @@ private final class AnnotationCanvasView: NSView {
             // checkerboard fixed to the window.
             cameraCenter.x -= event.scrollingDeltaX / cameraScale
             cameraCenter.y -= event.scrollingDeltaY / cameraScale
-            isManuallyAdjusted = true
             needsDisplay = true
         }
     }
@@ -1116,7 +1098,6 @@ private final class AnnotationCanvasView: NSView {
             x: anchor.x - (pointInView.x - bounds.midX) / cameraScale,
             y: anchor.y - (pointInView.y - bounds.midY) / cameraScale
         )
-        isManuallyAdjusted = true
         needsDisplay = true
     }
 
@@ -1407,25 +1388,6 @@ private final class AnnotationCanvasView: NSView {
         guard content.width > 0, content.height > 0 else { return }
         cameraScale = max(minimumCameraScale, fittedScale(for: content))
         cameraCenter = CGPoint(x: content.midX, y: content.midY)
-        hasCamera = true
-        isManuallyAdjusted = false
-    }
-
-    /// Zooms out (never in) while the pointer keeps its content position, so
-    /// dragging past the edge grows the canvas instead of hitting a wall.
-    /// Manual zoom/pan is left alone; mouse-up refits if the content grew.
-    private func expandCameraIfNeeded(anchoredAt pointInView: CGPoint) {
-        guard screenshot != nil, !isManuallyAdjusted else { return }
-        let content = contentBoundsForCamera
-        let newScale = fittedScale(for: content)
-        guard newScale < cameraScale else { return }
-
-        let anchor = viewToContent(pointInView)
-        cameraScale = max(0.01, newScale)
-        cameraCenter = CGPoint(
-            x: anchor.x - (pointInView.x - bounds.midX) / cameraScale,
-            y: anchor.y - (pointInView.y - bounds.midY) / cameraScale
-        )
         hasCamera = true
     }
 
