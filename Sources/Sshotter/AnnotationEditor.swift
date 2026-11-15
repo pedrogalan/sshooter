@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import CoreImage
 
 // MARK: - Arrow style
 
@@ -79,6 +80,7 @@ enum ArrowColor: Int, CaseIterable {
 enum AnnotationTool {
     case arrow
     case square
+    case blur
 }
 
 /// Fill levels for the square tool. `full` means fully transparent (outline
@@ -239,6 +241,10 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         symbolName: "square",
         toolTip: "Square tool: drag on the canvas to mark an area. Click again to stop drawing."
     )
+    private let blurButton = ToolStripButton(
+        symbolName: "camera.filters",
+        toolTip: "Blur tool: drag over an area to blur it. Click again to stop drawing."
+    )
 
     init(
         onCopy: @escaping @MainActor (NSImage) -> Void,
@@ -268,6 +274,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         canvas.setTool(.arrow)
         arrowButton.setActive(true)
         squareButton.setActive(false)
+        blurButton.setActive(false)
     }
 
     // MARK: Setup
@@ -294,6 +301,11 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         squareButton.target = self
         squareButton.action = #selector(toggleSquareTool(_:))
         toolStrip.addSubview(squareButton)
+
+        blurButton.frame = NSRect(x: 194, y: 8, width: 40, height: 32)
+        blurButton.target = self
+        blurButton.action = #selector(toggleBlurTool(_:))
+        toolStrip.addSubview(blurButton)
 
         container.addSubview(toolStrip)
         NSLayoutConstraint.activate([
@@ -354,11 +366,16 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         toggleTool(.square)
     }
 
+    @objc private func toggleBlurTool(_ sender: Any?) {
+        toggleTool(.blur)
+    }
+
     private func toggleTool(_ tool: AnnotationTool) {
         if canvas.activeTool == tool {
             canvas.setTool(nil)
             arrowButton.setActive(false)
             squareButton.setActive(false)
+            blurButton.setActive(false)
         } else {
             selectTool(tool)
         }
@@ -369,6 +386,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         canvas.setTool(tool)
         arrowButton.setActive(tool == .arrow)
         squareButton.setActive(tool == .square)
+        blurButton.setActive(tool == .blur)
     }
 
     @objc func copyScreenshot(_ sender: Any?) {
@@ -981,9 +999,14 @@ private final class AnnotationCanvasView: NSView {
         var fill: SquareFill
     }
 
+    private struct BlurRegion {
+        var rect: CGRect
+    }
+
     private enum Selection {
         case arrow(Int)
         case square(Int)
+        case blur(Int)
     }
 
     private enum SquareCorner {
@@ -996,11 +1019,14 @@ private final class AnnotationCanvasView: NSView {
     private enum DragMode {
         case drawingArrow(start: CGPoint)
         case drawingSquare(start: CGPoint)
+        case drawingBlur(start: CGPoint)
         case moving(index: Int, original: Arrow, grabOffset: CGPoint)
         case movingSquare(index: Int, original: Square, grabOffset: CGPoint)
+        case movingBlur(index: Int, original: BlurRegion, grabOffset: CGPoint)
         case resizingStart(index: Int)
         case resizingEnd(index: Int)
         case resizingSquare(index: Int, original: CGRect, corner: SquareCorner)
+        case resizingBlur(index: Int, original: CGRect, corner: SquareCorner)
     }
 
     private enum HitTarget {
@@ -1009,6 +1035,8 @@ private final class AnnotationCanvasView: NSView {
         case arrowBody(Int)
         case squareCorner(Int, SquareCorner)
         case squareBody(Int)
+        case blurCorner(Int, SquareCorner)
+        case blurBody(Int)
     }
 
     private let handleRadius: CGFloat = 6
@@ -1019,6 +1047,7 @@ private final class AnnotationCanvasView: NSView {
     private var screenshotImage: NSImage?
     private var arrows: [Arrow] = []
     private var squares: [Square] = []
+    private var blurRegions: [BlurRegion] = []
     private var selection: Selection?
     private var dragMode: DragMode?
     private var pointerPosition: CGPoint?
@@ -1028,6 +1057,9 @@ private final class AnnotationCanvasView: NSView {
     private var currentFill = SquarePreferences.fill
     private var trackingArea: NSTrackingArea?
     private let optionsPanel = ArrowOptionsPanel()
+    private var blurredScreenshot: CGImage?
+    private var blurredScreenshotImage: NSImage?
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     /// View transform: `cameraCenter` is the content point at the viewport
     /// center, and `cameraScale` is view points per content unit. Content is
@@ -1083,6 +1115,9 @@ private final class AnnotationCanvasView: NSView {
         currentFill = SquarePreferences.fill
         arrows.removeAll()
         squares.removeAll()
+        blurRegions.removeAll()
+        blurredScreenshot = nil
+        blurredScreenshotImage = nil
         selection = nil
         dragMode = nil
         pointerPosition = nil
@@ -1099,6 +1134,9 @@ private final class AnnotationCanvasView: NSView {
         dragMode = nil
         pointerPosition = nil
         selection = nil
+        if tool == .blur {
+            ensureBlurredScreenshot()
+        }
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
         updateOptionsVisibility()
@@ -1144,12 +1182,18 @@ private final class AnnotationCanvasView: NSView {
         let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
         let scale = cameraScale
 
+        // Blur affects the image itself, so it renders directly over the
+        // screenshot and underneath every annotation.
+        for region in blurRegions {
+            drawBlur(region)
+        }
+        if let pointerPosition, case .drawingBlur(let start)? = dragMode {
+            drawBlur(BlurRegion(rect: normalizedRect(from: start, to: pointerPosition)))
+        }
+
         // Squares sit behind arrows so arrows stay easy to read and select.
-        for (index, square) in squares.enumerated() {
+        for square in squares {
             drawSquare(square, imageSize: imageSize, scale: scale)
-            if case .square(index)? = selection {
-                drawHandles(for: square)
-            }
         }
 
         if let pointerPosition, case .drawingSquare(let start)? = dragMode {
@@ -1166,7 +1210,7 @@ private final class AnnotationCanvasView: NSView {
             )
         }
 
-        for (index, arrow) in arrows.enumerated() {
+        for arrow in arrows {
             let lineWidth = ArrowGeometry.lineWidth(
                 forImageSize: imageSize,
                 thickness: arrow.thickness
@@ -1179,9 +1223,6 @@ private final class AnnotationCanvasView: NSView {
                 headLength: headLength * scale,
                 color: arrow.color.nsColor
             )
-            if case .arrow(index)? = selection {
-                drawHandles(for: arrow)
-            }
         }
 
         if let pointerPosition, case .drawingArrow(let start)? = dragMode {
@@ -1197,6 +1238,15 @@ private final class AnnotationCanvasView: NSView {
                 headLength: headLength * scale,
                 color: currentColor.nsColor
             )
+        }
+
+        // Selection handles always stay visible above every annotation.
+        if case .square(let index)? = selection, squares.indices.contains(index) {
+            drawHandles(for: squares[index])
+        } else if case .arrow(let index)? = selection, arrows.indices.contains(index) {
+            drawHandles(for: arrows[index])
+        } else if case .blur(let index)? = selection, blurRegions.indices.contains(index) {
+            drawHandles(for: blurRegions[index])
         }
     }
 
@@ -1256,6 +1306,41 @@ private final class AnnotationCanvasView: NSView {
         square.color.nsColor.setStroke()
         path.lineWidth = lineWidth
         path.stroke()
+    }
+
+    private func drawBlur(_ region: BlurRegion) {
+        ensureBlurredScreenshot()
+        guard let blurredScreenshotImage else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: viewRect(for: region.rect)).addClip()
+        blurredScreenshotImage.draw(in: imageRect)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func blurRadius(for imageSize: CGSize) -> CGFloat {
+        let base = min(imageSize.width, imageSize.height)
+        return min(max(base * 0.012, 8), 48)
+    }
+
+    @discardableResult
+    private func ensureBlurredScreenshot() -> CGImage? {
+        if let blurredScreenshot { return blurredScreenshot }
+        guard let screenshot else { return nil }
+        let source = CIImage(cgImage: screenshot)
+        let radius = blurRadius(for: CGSize(width: screenshot.width, height: screenshot.height))
+        let output = source
+            .clampedToExtent()
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
+            .cropped(to: source.extent)
+        guard let image = ciContext.createCGImage(output, from: source.extent) else {
+            return nil
+        }
+        blurredScreenshot = image
+        blurredScreenshotImage = NSImage(
+            cgImage: image,
+            size: NSSize(width: image.width, height: image.height)
+        )
+        return image
     }
 
     private func squarePath(in rect: CGRect, rounded: Bool, lineWidth: CGFloat) -> NSBezierPath {
@@ -1358,6 +1443,29 @@ private final class AnnotationCanvasView: NSView {
         }
     }
 
+    private func drawHandles(for blur: BlurRegion) {
+        let rect = viewRect(for: blur.rect)
+        let outline = NSBezierPath(rect: rect.insetBy(dx: 0.5, dy: 0.5))
+        NSColor.controlAccentColor.withAlphaComponent(0.9).setStroke()
+        outline.lineWidth = 1
+        outline.stroke()
+
+        for (_, point) in cornerPoints(for: rect) {
+            let handle = NSRect(
+                x: point.x - handleRadius,
+                y: point.y - handleRadius,
+                width: handleRadius * 2,
+                height: handleRadius * 2
+            )
+            let path = NSBezierPath(ovalIn: handle)
+            NSColor.white.setFill()
+            path.fill()
+            NSColor.controlAccentColor.setStroke()
+            path.lineWidth = 2
+            path.stroke()
+        }
+    }
+
     // MARK: Mouse handling
 
     override func mouseDown(with event: NSEvent) {
@@ -1407,6 +1515,24 @@ private final class AnnotationCanvasView: NSView {
                         y: contentPoint.y - square.rect.minY
                     )
                 )
+            case let .blurCorner(index, corner):
+                selectBlur(at: index)
+                dragMode = .resizingBlur(
+                    index: index,
+                    original: blurRegions[index].rect,
+                    corner: corner
+                )
+            case .blurBody(let index):
+                let region = blurRegions[index]
+                selectBlur(at: index)
+                dragMode = .movingBlur(
+                    index: index,
+                    original: region,
+                    grabOffset: CGPoint(
+                        x: contentPoint.x - region.rect.minX,
+                        y: contentPoint.y - region.rect.minY
+                    )
+                )
             }
         } else {
             selection = nil
@@ -1418,6 +1544,9 @@ private final class AnnotationCanvasView: NSView {
                 pointerPosition = contentPoint
             case .some(.square):
                 dragMode = .drawingSquare(start: contentPoint)
+                pointerPosition = contentPoint
+            case .some(.blur):
+                dragMode = .drawingBlur(start: contentPoint)
                 pointerPosition = contentPoint
             case .none:
                 dragMode = nil
@@ -1432,7 +1561,7 @@ private final class AnnotationCanvasView: NSView {
         guard let point = clampedContentPoint(for: pointInView) else { return }
 
         switch mode {
-        case .drawingArrow, .drawingSquare:
+        case .drawingArrow, .drawingSquare, .drawingBlur:
             pointerPosition = point
         case let .moving(index, original, grabOffset):
             let proposedStart = CGPoint(
@@ -1465,12 +1594,27 @@ private final class AnnotationCanvasView: NSView {
             dy = min(max(dy, limits.minY - original.rect.minY), limits.maxY - original.rect.maxY)
 
             squares[index].rect = original.rect.offsetBy(dx: dx, dy: dy)
+        case let .movingBlur(index, original, grabOffset):
+            let proposedOrigin = CGPoint(
+                x: point.x - grabOffset.x,
+                y: point.y - grabOffset.y
+            )
+            var dx = proposedOrigin.x - original.rect.minX
+            var dy = proposedOrigin.y - original.rect.minY
+
+            let limits = visibleContentRect
+            dx = min(max(dx, limits.minX - original.rect.minX), limits.maxX - original.rect.maxX)
+            dy = min(max(dy, limits.minY - original.rect.minY), limits.maxY - original.rect.maxY)
+
+            blurRegions[index].rect = original.rect.offsetBy(dx: dx, dy: dy)
         case .resizingStart(let index):
             arrows[index].start = point
         case .resizingEnd(let index):
             arrows[index].end = point
         case let .resizingSquare(index, original, corner):
             squares[index].rect = resizedRect(original, corner: corner, to: point)
+        case let .resizingBlur(index, original, corner):
+            blurRegions[index].rect = resizedRect(original, corner: corner, to: point)
         }
 
         needsDisplay = true
@@ -1512,6 +1656,20 @@ private final class AnnotationCanvasView: NSView {
                         fill: currentFill
                     ))
                     selection = .square(squares.count - 1)
+                    updateOptionsVisibility()
+                } else {
+                    selection = nil
+                }
+            }
+        case .drawingBlur(let start):
+            if let end = clampedContentPoint(for: pointInView) {
+                let startInView = contentToView(start)
+                let endInView = contentToView(end)
+                if distance(from: startInView, to: endInView) >= minimumDragDistance {
+                    blurRegions.append(BlurRegion(
+                        rect: normalizedRect(from: start, to: end)
+                    ))
+                    selection = .blur(blurRegions.count - 1)
                     updateOptionsVisibility()
                 } else {
                     selection = nil
@@ -1631,6 +1789,11 @@ private final class AnnotationCanvasView: NSView {
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
     }
 
+    private func selectBlur(at index: Int) {
+        guard blurRegions.indices.contains(index) else { return }
+        selection = .blur(index)
+    }
+
     private func applyColor(_ color: ArrowColor) {
         currentColor = color
         ArrowPreferences.color = color
@@ -1676,7 +1839,7 @@ private final class AnnotationCanvasView: NSView {
     }
 
     private func updateOptionsVisibility(animated: Bool = true) {
-        let shouldShow = !arrows.isEmpty || !squares.isEmpty
+        let shouldShow = !arrows.isEmpty || !squares.isEmpty || !blurRegions.isEmpty
         if shouldShow {
             guard optionsPanel.isHidden else { return }
             optionsPanel.isHidden = false
@@ -1727,6 +1890,9 @@ private final class AnnotationCanvasView: NSView {
         case .square(let index):
             guard squares.indices.contains(index) else { return false }
             squares.remove(at: index)
+        case .blur(let index):
+            guard blurRegions.indices.contains(index) else { return false }
+            blurRegions.remove(at: index)
         }
         self.selection = nil
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
@@ -1851,6 +2017,30 @@ private final class AnnotationCanvasView: NSView {
             }
         }
 
+        // Blur regions sit underneath the visible annotations. They only
+        // capture pointer events while selected, with the blur tool active,
+        // or with every tool switched off, so arrows and squares can still be
+        // drawn directly over blurred content.
+        for index in blurRegions.indices.reversed() {
+            let rect = viewRect(for: blurRegions[index].rect)
+            let isSelected: Bool
+            if case .blur(index)? = selection {
+                isSelected = true
+            } else {
+                isSelected = false
+            }
+            guard isSelected || activeTool == nil || activeTool == .blur else { continue }
+
+            for (corner, cornerPoint) in cornerPoints(for: rect) {
+                if distance(from: point, to: cornerPoint) <= endpointTolerance {
+                    return .blurCorner(index, corner)
+                }
+            }
+            if rect.insetBy(dx: -4, dy: -4).contains(point) {
+                return .blurBody(index)
+            }
+        }
+
         return nil
     }
 
@@ -1884,6 +2074,9 @@ private final class AnnotationCanvasView: NSView {
         for square in squares {
             bounds = bounds.union(squareBounds(for: square, imageSize: imageSize))
         }
+        for region in blurRegions {
+            bounds = bounds.union(region.rect)
+        }
         return bounds
     }
 
@@ -1915,6 +2108,8 @@ private final class AnnotationCanvasView: NSView {
                     ),
                     imageSize: imageSize
                 ))
+            case .drawingBlur(let start)?:
+                bounds = bounds.union(normalizedRect(from: start, to: pointerPosition))
             default:
                 break
             }
@@ -2061,6 +2256,9 @@ private final class AnnotationCanvasView: NSView {
         for square in squares {
             exportBounds = exportBounds.union(squareBounds(for: square, imageSize: imageSize))
         }
+        for region in blurRegions {
+            exportBounds = exportBounds.union(region.rect)
+        }
 
         let originX = floor(exportBounds.minX)
         let originY = floor(exportBounds.minY)
@@ -2081,12 +2279,27 @@ private final class AnnotationCanvasView: NSView {
         // The image keeps its pixel position inside the expanded canvas. The
         // added area stays transparent, matching the editor's checkerboard.
         context.interpolationQuality = .high
-        context.draw(screenshot, in: CGRect(
+        let imageDestination = CGRect(
             x: -originX,
             y: CGFloat(exportHeight) + originY - CGFloat(imageHeight),
             width: CGFloat(imageWidth),
             height: CGFloat(imageHeight)
-        ))
+        )
+        context.draw(screenshot, in: imageDestination)
+
+        if !blurRegions.isEmpty, let blurred = ensureBlurredScreenshot() {
+            for region in blurRegions {
+                context.saveGState()
+                context.clip(to: exportRect(
+                    region.rect,
+                    originX: originX,
+                    originY: originY,
+                    exportHeight: exportHeight
+                ))
+                context.draw(blurred, in: imageDestination)
+                context.restoreGState()
+            }
+        }
 
         context.setLineCap(.round)
         context.setLineJoin(.round)

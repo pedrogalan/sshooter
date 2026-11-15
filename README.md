@@ -30,6 +30,11 @@ The square tool works the same way: drag on the canvas to mark an area. Squares
 stay selected after drawing; drag a corner to resize, or drag the body to move
 one. Press **Delete** to remove it.
 
+The blur tool redacts part of the capture: drag a rectangle and the image
+underneath it is blurred. Blur regions are edited like squares — drag a corner
+to resize, drag the body to move, or press **Delete** to remove one. Blur is
+baked into Copy and Save at full resolution.
+
 The canvas has a checkerboard work area around the image, so annotations can
 start or end outside the capture. The image and the annotations together are
 treated as the content: they are fitted at up to 1:1 into the window with a
