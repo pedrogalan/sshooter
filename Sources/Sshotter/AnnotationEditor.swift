@@ -478,6 +478,14 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         toggleTool(.text)
     }
 
+    @objc func undoAnnotation(_ sender: Any?) {
+        canvas.undoAnnotationOrTextEdit(redo: false)
+    }
+
+    @objc func redoAnnotation(_ sender: Any?) {
+        canvas.undoAnnotationOrTextEdit(redo: true)
+    }
+
     @objc private func selectPointerTool(_ sender: Any?) {
         canvas.setTool(nil)
         pointerButton.setActive(true)
@@ -545,6 +553,12 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         }
 
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if let key = event.charactersIgnoringModifiers?.lowercased(),
+           key == "z",
+           modifiers == .command || modifiers == [.command, .shift] {
+            canvas.undoAnnotationOrTextEdit(redo: modifiers.contains(.shift))
+            return true
+        }
         if modifiers == .command, let key = event.charactersIgnoringModifiers?.lowercased() {
             if key == "c" {
                 copyScreenshot(nil)
@@ -1356,6 +1370,13 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         var background: TextBackground
     }
 
+    private struct AnnotationSnapshot {
+        var arrows: [Arrow]
+        var squares: [Square]
+        var blurRegions: [BlurRegion]
+        var textNotes: [TextNote]
+    }
+
     private enum Selection {
         case arrow(Int)
         case square(Int)
@@ -1417,8 +1438,13 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var currentTextScale = TextPreferences.scale
     private var textEditor: NSTextField?
     private var editingTextIndex: Int?
+    private var lastObservedEditingText = ""
+    private var textCreationUndoSnapshot: AnnotationSnapshot?
     private var ignoreNextMouseDownAfterTextCommit = false
     private var isPreparingTextEditor = false
+    private let annotationUndoManager = UndoManager()
+    private var dragUndoSnapshot: AnnotationSnapshot?
+    private var didDragAnnotation = false
     private var trackingArea: NSTrackingArea?
     private let optionsPanel = ArrowOptionsPanel()
     private var blurredScreenshot: CGImage?
@@ -1441,6 +1467,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        annotationUndoManager.groupsByEvent = false
         optionsPanel.isHidden = true
         optionsPanel.onColorSelected = { [weak self] color in
             self?.applyColor(color)
@@ -1479,6 +1506,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     func setImage(_ image: CGImage) {
         commitTextEditing()
+        annotationUndoManager.removeAllActions()
         screenshot = image
         screenshotImage = NSImage(
             cgImage: image,
@@ -1507,6 +1535,58 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         updateOptionsVisibility(animated: false)
         fitCameraToContent()
         needsDisplay = true
+    }
+
+    private func annotationSnapshot() -> AnnotationSnapshot {
+        AnnotationSnapshot(
+            arrows: arrows,
+            squares: squares,
+            blurRegions: blurRegions,
+            textNotes: textNotes
+        )
+    }
+
+    private func restoreAnnotations(_ snapshot: AnnotationSnapshot) {
+        if editingTextIndex != nil {
+            endTextEditing(makeCanvasFirstResponder: false)
+        }
+        arrows = snapshot.arrows
+        squares = snapshot.squares
+        blurRegions = snapshot.blurRegions
+        textNotes = snapshot.textNotes
+        selection = nil
+        dragMode = nil
+        blurredScreenshot = nil
+        blurredScreenshotImage = nil
+        optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
+        updateOptionsVisibility()
+        needsDisplay = true
+    }
+
+    private func registerAnnotationUndo(
+        restoring snapshot: AnnotationSnapshot,
+        actionName: String
+    ) {
+        annotationUndoManager.beginUndoGrouping()
+        annotationUndoManager.registerUndo(withTarget: self) { target in
+            let current = target.annotationSnapshot()
+            target.restoreAnnotations(snapshot)
+            target.registerAnnotationUndo(restoring: current, actionName: actionName)
+        }
+        annotationUndoManager.setActionName(actionName)
+        annotationUndoManager.endUndoGrouping()
+    }
+
+    func undoAnnotationOrTextEdit(redo: Bool) {
+        if redo {
+            if annotationUndoManager.canRedo { annotationUndoManager.redo() }
+        } else if annotationUndoManager.canUndo {
+            annotationUndoManager.undo()
+        } else if editingTextIndex != nil {
+            commitTextEditing()
+        }
     }
 
     func setTool(_ tool: AnnotationTool?) {
@@ -1968,6 +2048,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     // MARK: Text editing
 
     private func createTextNote(at point: CGPoint) {
+        let beforeCreation = annotationSnapshot()
         let note = TextNote(
             origin: point,
             text: "",
@@ -1980,6 +2061,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         selection = .text(index)
         updateOptionsVisibility()
         beginTextEditing(at: index)
+        textCreationUndoSnapshot = beforeCreation
     }
 
     private func beginTextEditing(at index: Int) {
@@ -1987,6 +2069,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         endTextEditing(makeCanvasFirstResponder: false)
 
         editingTextIndex = index
+        lastObservedEditingText = textNotes[index].text
+        textCreationUndoSnapshot = nil
 
         let field = NSTextField(frame: .zero)
         field.delegate = self
@@ -2055,13 +2139,20 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
         if textNotes.indices.contains(index) {
             if text.isEmpty {
-                textNotes.remove(at: index)
+                if textCreationUndoSnapshot == nil {
+                    let beforeRemoval = annotationSnapshot()
+                    textNotes.remove(at: index)
+                    registerAnnotationUndo(restoring: beforeRemoval, actionName: "Remove Text")
+                } else {
+                    textNotes.remove(at: index)
+                }
                 selection = nil
             } else {
                 textNotes[index].text = text
             }
         }
 
+        textCreationUndoSnapshot = nil
         endTextEditing()
     }
 
@@ -2073,6 +2164,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     private func endTextEditing(makeCanvasFirstResponder: Bool = true) {
         editingTextIndex = nil
+        lastObservedEditingText = ""
+        textCreationUndoSnapshot = nil
         textEditor?.removeFromSuperview()
         textEditor = nil
         if makeCanvasFirstResponder {
@@ -2099,7 +2192,50 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         guard !isPreparingTextEditor,
               let field = textEditor,
               (notification.object as? NSTextField) === field else { return }
+        let newText = field.stringValue
+        if newText != lastObservedEditingText,
+           let index = editingTextIndex,
+           textNotes.indices.contains(index) {
+            let previousText = lastObservedEditingText
+            if !newText.isEmpty, let creationSnapshot = textCreationUndoSnapshot {
+                registerAnnotationUndo(restoring: creationSnapshot, actionName: "Add Text")
+                textCreationUndoSnapshot = nil
+            }
+            registerTextChange(from: previousText, to: newText, at: index)
+            textNotes[index].text = newText
+            lastObservedEditingText = newText
+        }
         positionTextEditor()
+        needsDisplay = true
+    }
+
+    private func registerTextChange(from oldText: String, to newText: String, at index: Int) {
+        annotationUndoManager.beginUndoGrouping()
+        annotationUndoManager.registerUndo(withTarget: self) { target in
+            target.applyTextUndoValue(oldText, inverseValue: newText, at: index)
+        }
+        annotationUndoManager.setActionName("Typing")
+        annotationUndoManager.endUndoGrouping()
+    }
+
+    private func applyTextUndoValue(_ text: String, inverseValue: String, at index: Int) {
+        guard textNotes.indices.contains(index) else { return }
+        annotationUndoManager.beginUndoGrouping()
+        annotationUndoManager.registerUndo(withTarget: self) { target in
+            target.applyTextUndoValue(inverseValue, inverseValue: text, at: index)
+        }
+        annotationUndoManager.setActionName("Typing")
+        annotationUndoManager.endUndoGrouping()
+
+        textNotes[index].text = text
+        if editingTextIndex == index, let field = textEditor {
+            lastObservedEditingText = text
+            field.stringValue = text
+            if let editor = field.currentEditor() as? NSTextView {
+                editor.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
+            }
+            positionTextEditor()
+        }
         needsDisplay = true
     }
 
@@ -2142,6 +2278,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             return
         }
 
+        dragUndoSnapshot = annotationSnapshot()
+        didDragAnnotation = false
         if let target = hitTest(at: pointInView) {
             switch target {
             case .arrowStart(let index):
@@ -2242,6 +2380,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     override func mouseDragged(with event: NSEvent) {
         guard let mode = dragMode else { return }
+        didDragAnnotation = true
         let pointInView = clampedViewPoint(convert(event.locationInWindow, from: nil))
         guard let point = clampedContentPoint(for: pointInView) else { return }
 
@@ -2326,6 +2465,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     override func mouseUp(with event: NSEvent) {
         guard let mode = dragMode else { return }
         dragMode = nil
+        var createdAnnotation = false
 
         let pointInView = clampedViewPoint(convert(event.locationInWindow, from: nil))
         switch mode {
@@ -2340,6 +2480,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                         color: currentColor,
                         thickness: currentThickness
                     ))
+                    createdAnnotation = true
                     selection = .arrow(arrows.count - 1)
                     updateOptionsVisibility()
                 } else {
@@ -2358,6 +2499,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                         isRounded: currentRounded,
                         fill: currentFill
                     ))
+                    createdAnnotation = true
                     selection = .square(squares.count - 1)
                     updateOptionsVisibility()
                 } else {
@@ -2372,6 +2514,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                     blurRegions.append(BlurRegion(
                         rect: normalizedRect(from: start, to: end)
                     ))
+                    createdAnnotation = true
                     selection = .blur(blurRegions.count - 1)
                     updateOptionsVisibility()
                 } else {
@@ -2383,6 +2526,12 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         }
 
         pointerPosition = nil
+        if (createdAnnotation || didDragAnnotation), let dragUndoSnapshot {
+            let actionName = createdAnnotation ? "Add Annotation" : "Edit Annotation"
+            registerAnnotationUndo(restoring: dragUndoSnapshot, actionName: actionName)
+        }
+        dragUndoSnapshot = nil
+        didDragAnnotation = false
         updateCursor(at: pointInView)
         needsDisplay = true
     }
@@ -2538,77 +2687,105 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     private func applyColor(_ color: ArrowColor) {
+        let before = annotationSnapshot()
+        var changedAnnotation = false
         currentColor = color
         ArrowPreferences.color = color
         if case .arrow(let index)? = selection, arrows.indices.contains(index) {
             arrows[index].color = color
+            changedAnnotation = true
         } else if case .square(let index)? = selection, squares.indices.contains(index) {
             squares[index].color = color
+            changedAnnotation = true
         }
+        if changedAnnotation { registerAnnotationUndo(restoring: before, actionName: "Change Color") }
         needsDisplay = true
         window?.makeFirstResponder(self)
     }
 
     private func applyThickness(_ thickness: ArrowLineWidth) {
+        let before = annotationSnapshot()
+        var changedAnnotation = false
         currentThickness = thickness
         ArrowPreferences.lineWidth = thickness
         if case .arrow(let index)? = selection, arrows.indices.contains(index) {
             arrows[index].thickness = thickness
+            changedAnnotation = true
         } else if case .square(let index)? = selection, squares.indices.contains(index) {
             squares[index].thickness = thickness
+            changedAnnotation = true
         }
+        if changedAnnotation { registerAnnotationUndo(restoring: before, actionName: "Change Thickness") }
         needsDisplay = true
         window?.makeFirstResponder(self)
     }
 
     private func applyRounded(_ rounded: Bool) {
+        let before = annotationSnapshot()
+        var changedAnnotation = false
         currentRounded = rounded
         SquarePreferences.isRounded = rounded
         if case .square(let index)? = selection, squares.indices.contains(index) {
             squares[index].isRounded = rounded
+            changedAnnotation = true
         }
+        if changedAnnotation { registerAnnotationUndo(restoring: before, actionName: "Change Corner Style") }
         needsDisplay = true
         window?.makeFirstResponder(self)
     }
 
     private func applyFill(_ fill: SquareFill) {
+        let before = annotationSnapshot()
+        var changedAnnotation = false
         currentFill = fill
         SquarePreferences.fill = fill
         if case .square(let index)? = selection, squares.indices.contains(index) {
             squares[index].fill = fill
+            changedAnnotation = true
         }
+        if changedAnnotation { registerAnnotationUndo(restoring: before, actionName: "Change Fill") }
         needsDisplay = true
         window?.makeFirstResponder(self)
     }
 
     private func applyTextColor(_ color: ArrowColor) {
+        let before = annotationSnapshot()
+        var changedAnnotation = false
         currentTextColor = color
         TextPreferences.color = color
         if case .text(let index)? = selection, textNotes.indices.contains(index) {
             textNotes[index].color = color
+            changedAnnotation = true
             if editingTextIndex == index {
                 textEditor?.textColor = color.nsColor
             }
         }
+        if changedAnnotation { registerAnnotationUndo(restoring: before, actionName: "Change Text Color") }
         needsDisplay = true
         window?.makeFirstResponder(self)
     }
 
     private func applyTextBackground(_ background: TextBackground) {
+        let before = annotationSnapshot()
+        var changedAnnotation = false
         currentTextBackground = background
         TextPreferences.background = background
         if case .text(let index)? = selection, textNotes.indices.contains(index) {
             textNotes[index].background = background
+            changedAnnotation = true
             if editingTextIndex == index {
                 textEditor?.backgroundColor = background.nsColor
                     ?? NSColor.textBackgroundColor.withAlphaComponent(0.12)
             }
         }
+        if changedAnnotation { registerAnnotationUndo(restoring: before, actionName: "Change Text Background") }
         needsDisplay = true
         window?.makeFirstResponder(self)
     }
 
     private func adjustTextSize(increase: Bool) {
+        let before = annotationSnapshot()
+        var changedAnnotation = false
         currentTextScale = min(
             max(currentTextScale * (increase ? 1.15 : 1 / 1.15), TextPreferences.minimumScale),
             TextPreferences.maximumScale
@@ -2616,8 +2793,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         TextPreferences.scale = currentTextScale
         if case .text(let index)? = selection, textNotes.indices.contains(index) {
             textNotes[index].fontSize = baseTextFontSize() * currentTextScale
+            changedAnnotation = true
             positionTextEditor()
         }
+        if changedAnnotation { registerAnnotationUndo(restoring: before, actionName: "Change Text Size") }
         needsDisplay = true
         window?.makeFirstResponder(self)
     }
@@ -2697,6 +2876,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     @discardableResult
     private func deleteSelection() -> Bool {
         guard let selection else { return false }
+        let before = annotationSnapshot()
         switch selection {
         case .arrow(let index):
             guard arrows.indices.contains(index) else { return false }
@@ -2711,6 +2891,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             guard textNotes.indices.contains(index) else { return false }
             textNotes.remove(at: index)
         }
+        registerAnnotationUndo(restoring: before, actionName: "Delete Annotation")
         self.selection = nil
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)

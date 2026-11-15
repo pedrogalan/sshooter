@@ -182,6 +182,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let editMenu = NSMenu(title: "Edit")
         editMenuItem.submenu = editMenu
         editMenu.addItem(
+            withTitle: "Undo",
+            action: #selector(AnnotationEditorWindow.undoAnnotation(_:)),
+            keyEquivalent: "z"
+        )
+        let redoItem = editMenu.addItem(
+            withTitle: "Redo",
+            action: #selector(AnnotationEditorWindow.redoAnnotation(_:)),
+            keyEquivalent: "z"
+        )
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(
             withTitle: "Copy Screenshot",
             action: #selector(AnnotationEditorWindow.copyScreenshot(_:)),
             keyEquivalent: "c"

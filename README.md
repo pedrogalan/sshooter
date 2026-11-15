@@ -44,6 +44,8 @@ labels can span several lines; click outside the label or press **Esc** to
 commit it. Drag a label to move it, double-click it to edit the wording, and
 press **Delete** to remove it. Text renders above the arrows, squares, and blur
 regions. The pointer stays a normal arrow over the toolbar and the options bar.
+Use **⌘Z** to undo annotation changes and **⇧⌘Z** to redo them. Text entry is
+undoable one edit at a time, including after you commit the label.
 
 Pick the text colour in the options bar, choose a background (white, yellow,
 black, blue, or **No background** for plain text), and use the two size buttons
