@@ -76,6 +76,65 @@ enum ArrowColor: Int, CaseIterable {
     }
 }
 
+enum AnnotationTool {
+    case arrow
+    case square
+}
+
+/// Fill levels for the square tool. `full` means fully transparent (outline
+/// only); the border is always opaque regardless of this value.
+enum SquareFill: Int, CaseIterable {
+    case full
+    case medium
+    case opaque
+
+    var title: String {
+        switch self {
+        case .full: "Full transparency"
+        case .medium: "Medium transparency"
+        case .opaque: "Opaque fill"
+        }
+    }
+
+    var fillAlpha: CGFloat {
+        switch self {
+        case .full: 0
+        case .medium: 0.5
+        case .opaque: 1
+        }
+    }
+}
+
+enum SquarePreferences {
+    private static let roundedKey = "squareRoundedCorners"
+    private static let fillKey = "squareFillLevel"
+
+    static var isRounded: Bool {
+        get {
+            let defaults = UserDefaults.standard
+            guard defaults.object(forKey: roundedKey) != nil else { return false }
+            return defaults.bool(forKey: roundedKey)
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: roundedKey)
+        }
+    }
+
+    static var fill: SquareFill {
+        get {
+            let defaults = UserDefaults.standard
+            guard defaults.object(forKey: fillKey) != nil,
+                  let value = SquareFill(rawValue: defaults.integer(forKey: fillKey)) else {
+                return .medium
+            }
+            return value
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: fillKey)
+        }
+    }
+}
+
 enum ArrowPreferences {
     private static let colorKey = "arrowColor"
     private static let lineWidthKey = "arrowLineWidth"
@@ -176,6 +235,10 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         symbolName: "arrow.up.right",
         toolTip: "Arrow tool: drag on the canvas to draw. Click again to stop drawing."
     )
+    private let squareButton = ToolStripButton(
+        symbolName: "square",
+        toolTip: "Square tool: drag on the canvas to mark an area. Click again to stop drawing."
+    )
 
     init(
         onCopy: @escaping @MainActor (NSImage) -> Void,
@@ -202,8 +265,9 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         configureToolStrip()
         configureCanvas()
 
-        canvas.setImageToolActive(true)
+        canvas.setTool(.arrow)
         arrowButton.setActive(true)
+        squareButton.setActive(false)
     }
 
     // MARK: Setup
@@ -225,6 +289,11 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         arrowButton.target = self
         arrowButton.action = #selector(toggleArrowTool(_:))
         toolStrip.addSubview(arrowButton)
+
+        squareButton.frame = NSRect(x: 150, y: 8, width: 40, height: 32)
+        squareButton.target = self
+        squareButton.action = #selector(toggleSquareTool(_:))
+        toolStrip.addSubview(squareButton)
 
         container.addSubview(toolStrip)
         NSLayoutConstraint.activate([
@@ -258,7 +327,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
             hasPositionedWindow = true
         }
 
-        setArrowToolActive(true)
+        selectTool(.arrow)
         NSApp.activate()
         makeKeyAndOrderFront(nil)
         makeFirstResponder(canvas)
@@ -278,13 +347,28 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
     // MARK: Actions
 
     @objc private func toggleArrowTool(_ sender: Any?) {
-        setArrowToolActive(!canvas.isImageToolActive)
+        toggleTool(.arrow)
+    }
+
+    @objc private func toggleSquareTool(_ sender: Any?) {
+        toggleTool(.square)
+    }
+
+    private func toggleTool(_ tool: AnnotationTool) {
+        if canvas.activeTool == tool {
+            canvas.setTool(nil)
+            arrowButton.setActive(false)
+            squareButton.setActive(false)
+        } else {
+            selectTool(tool)
+        }
         makeFirstResponder(canvas)
     }
 
-    private func setArrowToolActive(_ active: Bool) {
-        canvas.setImageToolActive(active)
-        arrowButton.setActive(active)
+    private func selectTool(_ tool: AnnotationTool) {
+        canvas.setTool(tool)
+        arrowButton.setActive(tool == .arrow)
+        squareButton.setActive(tool == .square)
     }
 
     @objc func copyScreenshot(_ sender: Any?) {
@@ -522,7 +606,7 @@ private final class ThicknessButton: HoverButton {
     init(thickness: ArrowLineWidth) {
         self.thickness = thickness
         super.init(frame: .zero)
-        toolTip = "\(thickness.title) arrow"
+        toolTip = "\(thickness.title) stroke"
     }
 
     required init?(coder: NSCoder) {
@@ -556,6 +640,94 @@ private final class ThicknessButton: HoverButton {
     }
 }
 
+@MainActor
+private final class RoundedCornerButton: HoverButton {
+    private(set) var isSelected = false {
+        didSet { needsDisplay = true }
+    }
+
+    init() {
+        super.init(frame: .zero)
+        toolTip = "Rounded corners"
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func setSelected(_ selected: Bool) {
+        isSelected = selected
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isSelected || isHovered {
+            let color: NSColor = isSelected
+                ? NSColor.controlAccentColor.withAlphaComponent(0.16)
+                : NSColor.labelColor.withAlphaComponent(0.07)
+            color.setFill()
+            NSBezierPath(
+                roundedRect: bounds.insetBy(dx: 1, dy: 1),
+                xRadius: 6,
+                yRadius: 6
+            ).fill()
+        }
+
+        let glyph = bounds.insetBy(dx: 7, dy: 7)
+        let path = isSelected
+            ? NSBezierPath(roundedRect: glyph, xRadius: 4, yRadius: 4)
+            : NSBezierPath(rect: glyph)
+        (isSelected ? NSColor.controlAccentColor : NSColor.labelColor).setStroke()
+        path.lineWidth = 1.5
+        path.stroke()
+    }
+}
+
+@MainActor
+private final class FillLevelButton: HoverButton {
+    let fill: SquareFill
+    private(set) var isSelected = false {
+        didSet { needsDisplay = true }
+    }
+
+    init(fill: SquareFill) {
+        self.fill = fill
+        super.init(frame: .zero)
+        toolTip = fill.title
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func setSelected(_ selected: Bool) {
+        isSelected = selected
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isSelected || isHovered {
+            let color: NSColor = isSelected
+                ? NSColor.controlAccentColor.withAlphaComponent(0.16)
+                : NSColor.labelColor.withAlphaComponent(0.07)
+            color.setFill()
+            NSBezierPath(
+                roundedRect: bounds.insetBy(dx: 1, dy: 1),
+                xRadius: 6,
+                yRadius: 6
+            ).fill()
+        }
+
+        let glyph = bounds.insetBy(dx: 6, dy: 6)
+        let path = NSBezierPath(rect: glyph)
+        if fill.fillAlpha > 0 {
+            NSColor.labelColor.withAlphaComponent(fill.fillAlpha).setFill()
+            path.fill()
+        }
+        (isSelected ? NSColor.controlAccentColor : NSColor.labelColor).setStroke()
+        path.lineWidth = 1.5
+        path.stroke()
+    }
+}
+
 // MARK: - Options panel
 
 @MainActor
@@ -566,13 +738,20 @@ private final class ArrowOptionsPanel: NSView {
     private static let thicknessSpacing: CGFloat = 2
     private static let horizontalPadding: CGFloat = 10
     private static let dividerGap: CGFloat = 12
+    private static let roundedGap: CGFloat = 6
     private static let panelHeight: CGFloat = 44
 
     var onColorSelected: (@MainActor (ArrowColor) -> Void)?
     var onThicknessSelected: (@MainActor (ArrowLineWidth) -> Void)?
+    var onRoundedChanged: (@MainActor (Bool) -> Void)?
+    var onFillChanged: (@MainActor (SquareFill) -> Void)?
 
     private var swatchButtons: [ColorSwatchButton] = []
     private var thicknessButtons: [ThicknessButton] = []
+    private let roundedButton = RoundedCornerButton()
+    private var fillButtons: [FillLevelButton] = []
+    private var isRounded = SquarePreferences.isRounded
+    private var fill = SquarePreferences.fill
 
     override var isFlipped: Bool { false }
 
@@ -594,7 +773,15 @@ private final class ArrowOptionsPanel: NSView {
             + CGFloat(ArrowColor.allCases.count - 1) * swatchSpacing
         let thicknesses = CGFloat(ArrowLineWidth.allCases.count) * thicknessSize
             + CGFloat(ArrowLineWidth.allCases.count - 1) * thicknessSpacing
-        let width = horizontalPadding * 2 + swatches + dividerGap * 2 + 1 + thicknesses
+        let fills = CGFloat(SquareFill.allCases.count) * thicknessSize
+            + CGFloat(SquareFill.allCases.count - 1) * thicknessSpacing
+        let width = horizontalPadding * 2
+            + swatches
+            + dividerGap * 2 + 1
+            + thicknesses
+            + dividerGap * 2 + 1
+            + thicknessSize + roundedGap
+            + fills
         return NSSize(width: width, height: panelHeight)
     }
 
@@ -645,6 +832,47 @@ private final class ArrowOptionsPanel: NSView {
             thicknessButtons.append(button)
             x += Self.thicknessSize + Self.thicknessSpacing
         }
+
+        x += Self.dividerGap - Self.thicknessSpacing
+
+        let squareDivider = NSBox(frame: NSRect(
+            x: x,
+            y: 10,
+            width: 1,
+            height: Self.panelHeight - 20
+        ))
+        squareDivider.boxType = .separator
+        addSubview(squareDivider)
+
+        x += 1 + Self.dividerGap
+
+        roundedButton.target = self
+        roundedButton.action = #selector(toggleRounded(_:))
+        roundedButton.frame = NSRect(
+            x: x,
+            y: (Self.panelHeight - Self.thicknessSize) / 2,
+            width: Self.thicknessSize,
+            height: Self.thicknessSize
+        )
+        addSubview(roundedButton)
+        x += Self.thicknessSize + Self.roundedGap
+
+        for fill in SquareFill.allCases {
+            let button = FillLevelButton(fill: fill)
+            button.target = self
+            button.action = #selector(selectFill(_:))
+            button.frame = NSRect(
+                x: x,
+                y: (Self.panelHeight - Self.thicknessSize) / 2,
+                width: Self.thicknessSize,
+                height: Self.thicknessSize
+            )
+            addSubview(button)
+            fillButtons.append(button)
+            x += Self.thicknessSize + Self.thicknessSpacing
+        }
+
+        updateSquareSelection(isRounded: isRounded, fill: fill)
     }
 
     func updateSelection(color: ArrowColor, thickness: ArrowLineWidth) {
@@ -654,6 +882,29 @@ private final class ArrowOptionsPanel: NSView {
         for button in thicknessButtons {
             button.setSelected(button.tag == thickness.rawValue)
         }
+    }
+
+    func updateSquareSelection(isRounded: Bool, fill: SquareFill) {
+        self.isRounded = isRounded
+        self.fill = fill
+        roundedButton.setSelected(isRounded)
+        for button in fillButtons {
+            button.setSelected(button.fill == fill)
+        }
+    }
+
+    @objc private func toggleRounded(_ sender: Any?) {
+        isRounded.toggle()
+        roundedButton.setSelected(isRounded)
+        onRoundedChanged?(isRounded)
+    }
+
+    @objc private func selectFill(_ sender: FillLevelButton) {
+        fill = sender.fill
+        for button in fillButtons {
+            button.setSelected(button.fill == fill)
+        }
+        onFillChanged?(fill)
     }
 
     @objc private func selectColor(_ sender: NSButton) {
@@ -722,17 +973,42 @@ private final class AnnotationCanvasView: NSView {
         var thickness: ArrowLineWidth
     }
 
+    private struct Square {
+        var rect: CGRect
+        var color: ArrowColor
+        var thickness: ArrowLineWidth
+        var isRounded: Bool
+        var fill: SquareFill
+    }
+
+    private enum Selection {
+        case arrow(Int)
+        case square(Int)
+    }
+
+    private enum SquareCorner {
+        case topLeft
+        case topRight
+        case bottomLeft
+        case bottomRight
+    }
+
     private enum DragMode {
-        case drawing(start: CGPoint)
+        case drawingArrow(start: CGPoint)
+        case drawingSquare(start: CGPoint)
         case moving(index: Int, original: Arrow, grabOffset: CGPoint)
+        case movingSquare(index: Int, original: Square, grabOffset: CGPoint)
         case resizingStart(index: Int)
         case resizingEnd(index: Int)
+        case resizingSquare(index: Int, original: CGRect, corner: SquareCorner)
     }
 
     private enum HitTarget {
-        case start(Int)
-        case end(Int)
-        case body(Int)
+        case arrowStart(Int)
+        case arrowEnd(Int)
+        case arrowBody(Int)
+        case squareCorner(Int, SquareCorner)
+        case squareBody(Int)
     }
 
     private let handleRadius: CGFloat = 6
@@ -742,11 +1018,14 @@ private final class AnnotationCanvasView: NSView {
     private var screenshot: CGImage?
     private var screenshotImage: NSImage?
     private var arrows: [Arrow] = []
-    private var selectedArrowIndex: Int?
+    private var squares: [Square] = []
+    private var selection: Selection?
     private var dragMode: DragMode?
     private var pointerPosition: CGPoint?
     private var currentColor = ArrowPreferences.color
     private var currentThickness = ArrowPreferences.lineWidth
+    private var currentRounded = SquarePreferences.isRounded
+    private var currentFill = SquarePreferences.fill
     private var trackingArea: NSTrackingArea?
     private let optionsPanel = ArrowOptionsPanel()
 
@@ -759,7 +1038,7 @@ private final class AnnotationCanvasView: NSView {
     private let minimumCameraScale: CGFloat = 0.02
     private let maximumCameraScale: CGFloat = 4
 
-    private(set) var isImageToolActive = true
+    private(set) var activeTool: AnnotationTool? = .arrow
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -773,7 +1052,14 @@ private final class AnnotationCanvasView: NSView {
         optionsPanel.onThicknessSelected = { [weak self] thickness in
             self?.applyThickness(thickness)
         }
+        optionsPanel.onRoundedChanged = { [weak self] rounded in
+            self?.applyRounded(rounded)
+        }
+        optionsPanel.onFillChanged = { [weak self] fill in
+            self?.applyFill(fill)
+        }
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
         addSubview(optionsPanel)
     }
 
@@ -793,26 +1079,30 @@ private final class AnnotationCanvasView: NSView {
         )
         currentColor = ArrowPreferences.color
         currentThickness = ArrowPreferences.lineWidth
+        currentRounded = SquarePreferences.isRounded
+        currentFill = SquarePreferences.fill
         arrows.removeAll()
-        selectedArrowIndex = nil
+        squares.removeAll()
+        selection = nil
         dragMode = nil
         pointerPosition = nil
         hasCamera = false
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
         updateOptionsVisibility(animated: false)
         fitCameraToContent()
         needsDisplay = true
     }
 
-    func setImageToolActive(_ active: Bool) {
-        isImageToolActive = active
-        if !active {
-            dragMode = nil
-            pointerPosition = nil
-            selectedArrowIndex = nil
-            optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
-            needsDisplay = true
-        }
+    func setTool(_ tool: AnnotationTool?) {
+        activeTool = tool
+        dragMode = nil
+        pointerPosition = nil
+        selection = nil
+        optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        updateOptionsVisibility()
+        needsDisplay = true
     }
 
     // MARK: Layout
@@ -854,6 +1144,28 @@ private final class AnnotationCanvasView: NSView {
         let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
         let scale = cameraScale
 
+        // Squares sit behind arrows so arrows stay easy to read and select.
+        for (index, square) in squares.enumerated() {
+            drawSquare(square, imageSize: imageSize, scale: scale)
+            if case .square(index)? = selection {
+                drawHandles(for: square)
+            }
+        }
+
+        if let pointerPosition, case .drawingSquare(let start)? = dragMode {
+            drawSquare(
+                Square(
+                    rect: normalizedRect(from: start, to: pointerPosition),
+                    color: currentColor,
+                    thickness: currentThickness,
+                    isRounded: currentRounded,
+                    fill: currentFill
+                ),
+                imageSize: imageSize,
+                scale: scale
+            )
+        }
+
         for (index, arrow) in arrows.enumerated() {
             let lineWidth = ArrowGeometry.lineWidth(
                 forImageSize: imageSize,
@@ -867,12 +1179,12 @@ private final class AnnotationCanvasView: NSView {
                 headLength: headLength * scale,
                 color: arrow.color.nsColor
             )
-            if index == selectedArrowIndex {
+            if case .arrow(index)? = selection {
                 drawHandles(for: arrow)
             }
         }
 
-        if case .drawing(let start)? = dragMode, let pointerPosition {
+        if let pointerPosition, case .drawingArrow(let start)? = dragMode {
             let lineWidth = ArrowGeometry.lineWidth(
                 forImageSize: imageSize,
                 thickness: currentThickness
@@ -925,6 +1237,93 @@ private final class AnnotationCanvasView: NSView {
         path.stroke()
     }
 
+    private func drawSquare(_ square: Square, imageSize: CGSize, scale: CGFloat) {
+        let lineWidth = ArrowGeometry.lineWidth(
+            forImageSize: imageSize,
+            thickness: square.thickness
+        ) * scale
+        let path = squarePath(
+            in: viewRect(for: square.rect),
+            rounded: square.isRounded,
+            lineWidth: lineWidth
+        )
+        let fillAlpha = square.fill.fillAlpha
+        if fillAlpha > 0 {
+            square.color.nsColor.withAlphaComponent(fillAlpha).setFill()
+            path.fill()
+        }
+        // The border stays fully opaque regardless of the fill level.
+        square.color.nsColor.setStroke()
+        path.lineWidth = lineWidth
+        path.stroke()
+    }
+
+    private func squarePath(in rect: CGRect, rounded: Bool, lineWidth: CGFloat) -> NSBezierPath {
+        let inset = lineWidth / 2
+        let base = rect.insetBy(dx: inset, dy: inset)
+        guard base.width > 0, base.height > 0 else { return NSBezierPath() }
+        guard rounded else { return NSBezierPath(rect: base) }
+        let radius = min(base.width, base.height) * 0.16
+        return NSBezierPath(roundedRect: base, xRadius: radius, yRadius: radius)
+    }
+
+    private func viewRect(for rect: CGRect) -> CGRect {
+        let origin = contentToView(rect.origin)
+        return CGRect(
+            x: origin.x,
+            y: origin.y,
+            width: rect.width * cameraScale,
+            height: rect.height * cameraScale
+        )
+    }
+
+    private func normalizedRect(from start: CGPoint, to end: CGPoint) -> CGRect {
+        CGRect(
+            x: min(start.x, end.x),
+            y: min(start.y, end.y),
+            width: abs(end.x - start.x),
+            height: abs(end.y - start.y)
+        )
+    }
+
+    private func resizedRect(_ rect: CGRect, corner: SquareCorner, to point: CGPoint) -> CGRect {
+        var minX = rect.minX
+        var maxX = rect.maxX
+        var minY = rect.minY
+        var maxY = rect.maxY
+
+        switch corner {
+        case .topLeft:
+            minX = point.x
+            minY = point.y
+        case .topRight:
+            maxX = point.x
+            minY = point.y
+        case .bottomLeft:
+            minX = point.x
+            maxY = point.y
+        case .bottomRight:
+            maxX = point.x
+            maxY = point.y
+        }
+
+        return CGRect(
+            x: min(minX, maxX),
+            y: min(minY, maxY),
+            width: abs(maxX - minX),
+            height: abs(maxY - minY)
+        )
+    }
+
+    private func cornerPoints(for rect: CGRect) -> [(SquareCorner, CGPoint)] {
+        [
+            (.topLeft, CGPoint(x: rect.minX, y: rect.minY)),
+            (.topRight, CGPoint(x: rect.maxX, y: rect.minY)),
+            (.bottomLeft, CGPoint(x: rect.minX, y: rect.maxY)),
+            (.bottomRight, CGPoint(x: rect.maxX, y: rect.maxY))
+        ]
+    }
+
     private func drawHandles(for arrow: Arrow) {
         for point in [contentToView(arrow.start), contentToView(arrow.end)] {
             let rect = NSRect(
@@ -942,13 +1341,30 @@ private final class AnnotationCanvasView: NSView {
         }
     }
 
+    private func drawHandles(for square: Square) {
+        for (_, point) in cornerPoints(for: viewRect(for: square.rect)) {
+            let rect = NSRect(
+                x: point.x - handleRadius,
+                y: point.y - handleRadius,
+                width: handleRadius * 2,
+                height: handleRadius * 2
+            )
+            let path = NSBezierPath(ovalIn: rect)
+            NSColor.white.setFill()
+            path.fill()
+            square.color.nsColor.setStroke()
+            path.lineWidth = 2
+            path.stroke()
+        }
+    }
+
     // MARK: Mouse handling
 
     override func mouseDown(with event: NSEvent) {
         ensureCamera()
         let pointInView = convert(event.locationInWindow, from: nil)
         guard screenshot != nil, let contentPoint = clampedContentPoint(for: pointInView) else {
-            selectedArrowIndex = nil
+            selection = nil
             dragMode = nil
             needsDisplay = true
             return
@@ -956,13 +1372,13 @@ private final class AnnotationCanvasView: NSView {
 
         if let target = hitTest(at: pointInView) {
             switch target {
-            case .start(let index):
+            case .arrowStart(let index):
                 selectArrow(at: index)
                 dragMode = .resizingStart(index: index)
-            case .end(let index):
+            case .arrowEnd(let index):
                 selectArrow(at: index)
                 dragMode = .resizingEnd(index: index)
-            case .body(let index):
+            case .arrowBody(let index):
                 let arrow = arrows[index]
                 selectArrow(at: index)
                 dragMode = .moving(
@@ -973,16 +1389,39 @@ private final class AnnotationCanvasView: NSView {
                         y: contentPoint.y - arrow.start.y
                     )
                 )
+            case let .squareCorner(index, corner):
+                selectSquare(at: index)
+                dragMode = .resizingSquare(
+                    index: index,
+                    original: squares[index].rect,
+                    corner: corner
+                )
+            case .squareBody(let index):
+                let square = squares[index]
+                selectSquare(at: index)
+                dragMode = .movingSquare(
+                    index: index,
+                    original: square,
+                    grabOffset: CGPoint(
+                        x: contentPoint.x - square.rect.minX,
+                        y: contentPoint.y - square.rect.minY
+                    )
+                )
             }
-        } else if isImageToolActive {
-            selectedArrowIndex = nil
-            optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
-            dragMode = .drawing(start: contentPoint)
-            pointerPosition = contentPoint
         } else {
-            selectedArrowIndex = nil
-            dragMode = nil
+            selection = nil
             optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+            optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+            switch activeTool {
+            case .some(.arrow):
+                dragMode = .drawingArrow(start: contentPoint)
+                pointerPosition = contentPoint
+            case .some(.square):
+                dragMode = .drawingSquare(start: contentPoint)
+                pointerPosition = contentPoint
+            case .none:
+                dragMode = nil
+            }
         }
         needsDisplay = true
     }
@@ -993,7 +1432,7 @@ private final class AnnotationCanvasView: NSView {
         guard let point = clampedContentPoint(for: pointInView) else { return }
 
         switch mode {
-        case .drawing:
+        case .drawingArrow, .drawingSquare:
             pointerPosition = point
         case let .moving(index, original, grabOffset):
             let proposedStart = CGPoint(
@@ -1013,10 +1452,25 @@ private final class AnnotationCanvasView: NSView {
 
             arrows[index].start = CGPoint(x: original.start.x + dx, y: original.start.y + dy)
             arrows[index].end = CGPoint(x: original.end.x + dx, y: original.end.y + dy)
+        case let .movingSquare(index, original, grabOffset):
+            let proposedOrigin = CGPoint(
+                x: point.x - grabOffset.x,
+                y: point.y - grabOffset.y
+            )
+            var dx = proposedOrigin.x - original.rect.minX
+            var dy = proposedOrigin.y - original.rect.minY
+
+            let limits = visibleContentRect
+            dx = min(max(dx, limits.minX - original.rect.minX), limits.maxX - original.rect.maxX)
+            dy = min(max(dy, limits.minY - original.rect.minY), limits.maxY - original.rect.maxY)
+
+            squares[index].rect = original.rect.offsetBy(dx: dx, dy: dy)
         case .resizingStart(let index):
             arrows[index].start = point
         case .resizingEnd(let index):
             arrows[index].end = point
+        case let .resizingSquare(index, original, corner):
+            squares[index].rect = resizedRect(original, corner: corner, to: point)
         }
 
         needsDisplay = true
@@ -1027,22 +1481,44 @@ private final class AnnotationCanvasView: NSView {
         dragMode = nil
 
         let pointInView = clampedViewPoint(convert(event.locationInWindow, from: nil))
-        if case .drawing(let start) = mode,
-           let end = clampedContentPoint(for: pointInView) {
-            let startInView = contentToView(start)
-            let endInView = contentToView(end)
-            if distance(from: startInView, to: endInView) >= minimumDragDistance {
-                arrows.append(Arrow(
-                    start: start,
-                    end: end,
-                    color: currentColor,
-                    thickness: currentThickness
-                ))
-                selectedArrowIndex = arrows.count - 1
-                updateOptionsVisibility()
-            } else {
-                selectedArrowIndex = nil
+        switch mode {
+        case .drawingArrow(let start):
+            if let end = clampedContentPoint(for: pointInView) {
+                let startInView = contentToView(start)
+                let endInView = contentToView(end)
+                if distance(from: startInView, to: endInView) >= minimumDragDistance {
+                    arrows.append(Arrow(
+                        start: start,
+                        end: end,
+                        color: currentColor,
+                        thickness: currentThickness
+                    ))
+                    selection = .arrow(arrows.count - 1)
+                    updateOptionsVisibility()
+                } else {
+                    selection = nil
+                }
             }
+        case .drawingSquare(let start):
+            if let end = clampedContentPoint(for: pointInView) {
+                let startInView = contentToView(start)
+                let endInView = contentToView(end)
+                if distance(from: startInView, to: endInView) >= minimumDragDistance {
+                    squares.append(Square(
+                        rect: normalizedRect(from: start, to: end),
+                        color: currentColor,
+                        thickness: currentThickness,
+                        isRounded: currentRounded,
+                        fill: currentFill
+                    ))
+                    selection = .square(squares.count - 1)
+                    updateOptionsVisibility()
+                } else {
+                    selection = nil
+                }
+            }
+        default:
+            break
         }
 
         pointerPosition = nil
@@ -1136,18 +1612,32 @@ private final class AnnotationCanvasView: NSView {
 
     private func selectArrow(at index: Int) {
         guard arrows.indices.contains(index) else { return }
-        selectedArrowIndex = index
+        selection = .arrow(index)
         let arrow = arrows[index]
         currentColor = arrow.color
         currentThickness = arrow.thickness
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
     }
 
+    private func selectSquare(at index: Int) {
+        guard squares.indices.contains(index) else { return }
+        selection = .square(index)
+        let square = squares[index]
+        currentColor = square.color
+        currentThickness = square.thickness
+        currentRounded = square.isRounded
+        currentFill = square.fill
+        optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+    }
+
     private func applyColor(_ color: ArrowColor) {
         currentColor = color
         ArrowPreferences.color = color
-        if let index = selectedArrowIndex, arrows.indices.contains(index) {
+        if case .arrow(let index)? = selection, arrows.indices.contains(index) {
             arrows[index].color = color
+        } else if case .square(let index)? = selection, squares.indices.contains(index) {
+            squares[index].color = color
         }
         needsDisplay = true
         window?.makeFirstResponder(self)
@@ -1156,15 +1646,37 @@ private final class AnnotationCanvasView: NSView {
     private func applyThickness(_ thickness: ArrowLineWidth) {
         currentThickness = thickness
         ArrowPreferences.lineWidth = thickness
-        if let index = selectedArrowIndex, arrows.indices.contains(index) {
+        if case .arrow(let index)? = selection, arrows.indices.contains(index) {
             arrows[index].thickness = thickness
+        } else if case .square(let index)? = selection, squares.indices.contains(index) {
+            squares[index].thickness = thickness
+        }
+        needsDisplay = true
+        window?.makeFirstResponder(self)
+    }
+
+    private func applyRounded(_ rounded: Bool) {
+        currentRounded = rounded
+        SquarePreferences.isRounded = rounded
+        if case .square(let index)? = selection, squares.indices.contains(index) {
+            squares[index].isRounded = rounded
+        }
+        needsDisplay = true
+        window?.makeFirstResponder(self)
+    }
+
+    private func applyFill(_ fill: SquareFill) {
+        currentFill = fill
+        SquarePreferences.fill = fill
+        if case .square(let index)? = selection, squares.indices.contains(index) {
+            squares[index].fill = fill
         }
         needsDisplay = true
         window?.makeFirstResponder(self)
     }
 
     private func updateOptionsVisibility(animated: Bool = true) {
-        let shouldShow = !arrows.isEmpty
+        let shouldShow = !arrows.isEmpty || !squares.isEmpty
         if shouldShow {
             guard optionsPanel.isHidden else { return }
             optionsPanel.isHidden = false
@@ -1195,9 +1707,10 @@ private final class AnnotationCanvasView: NSView {
             needsDisplay = true
             return true
         }
-        if selectedArrowIndex != nil {
-            selectedArrowIndex = nil
+        if selection != nil {
+            selection = nil
             optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+            optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
             needsDisplay = true
             return true
         }
@@ -1205,11 +1718,19 @@ private final class AnnotationCanvasView: NSView {
     }
 
     @discardableResult
-    private func deleteSelectedArrow() -> Bool {
-        guard let index = selectedArrowIndex, arrows.indices.contains(index) else { return false }
-        arrows.remove(at: index)
-        selectedArrowIndex = nil
+    private func deleteSelection() -> Bool {
+        guard let selection else { return false }
+        switch selection {
+        case .arrow(let index):
+            guard arrows.indices.contains(index) else { return false }
+            arrows.remove(at: index)
+        case .square(let index):
+            guard squares.indices.contains(index) else { return false }
+            squares.remove(at: index)
+        }
+        self.selection = nil
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
         updateOptionsVisibility()
         needsDisplay = true
         return true
@@ -1224,7 +1745,7 @@ private final class AnnotationCanvasView: NSView {
         }
 
         if event.keyCode == 51 || event.keyCode == 117 {
-            if deleteSelectedArrow() { return }
+            if deleteSelection() { return }
         }
 
         if event.modifierFlags.contains(.command),
@@ -1266,14 +1787,15 @@ private final class AnnotationCanvasView: NSView {
         let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
         let endpointTolerance = handleRadius + 3
 
+        // Arrows sit in front of squares, so they win when they overlap.
         for index in arrows.indices.reversed() {
             let start = contentToView(arrows[index].start)
             let end = contentToView(arrows[index].end)
             if distance(from: point, to: end) <= endpointTolerance {
-                return .end(index)
+                return .arrowEnd(index)
             }
             if distance(from: point, to: start) <= endpointTolerance {
-                return .start(index)
+                return .arrowStart(index)
             }
         }
 
@@ -1286,7 +1808,46 @@ private final class AnnotationCanvasView: NSView {
             let start = contentToView(arrows[index].start)
             let end = contentToView(arrows[index].end)
             if distance(from: point, toSegmentFrom: start, to: end) <= bodyTolerance {
-                return .body(index)
+                return .arrowBody(index)
+            }
+        }
+
+        for index in squares.indices.reversed() {
+            let rect = viewRect(for: squares[index].rect)
+            for (corner, cornerPoint) in cornerPoints(for: rect) {
+                if distance(from: point, to: cornerPoint) <= endpointTolerance {
+                    return .squareCorner(index, corner)
+                }
+            }
+        }
+
+        for index in squares.indices.reversed() {
+            let square = squares[index]
+            let rect = viewRect(for: square.rect)
+            let strokeWidth = ArrowGeometry.lineWidth(
+                forImageSize: imageSize,
+                thickness: square.thickness
+            ) * scale
+            let tolerance = max(4, strokeWidth)
+            let outer = rect.insetBy(dx: -tolerance, dy: -tolerance)
+            guard outer.contains(point) else { continue }
+
+            let isSelected: Bool
+            if case .square(index)? = selection {
+                isSelected = true
+            } else {
+                isSelected = false
+            }
+
+            // Outline-only squares only capture their border, so annotations
+            // can still be drawn inside them. Filled, already selected, or
+            // tool-off squares are draggable from anywhere.
+            let inner = rect.insetBy(dx: tolerance, dy: tolerance)
+            let nearBorder = inner.width <= 0
+                || inner.height <= 0
+                || !inner.contains(point)
+            if activeTool == nil || square.fill.fillAlpha > 0 || isSelected || nearBorder {
+                return .squareBody(index)
             }
         }
 
@@ -1320,24 +1881,43 @@ private final class AnnotationCanvasView: NSView {
         for arrow in arrows {
             bounds = bounds.union(arrowBounds(for: arrow, imageSize: imageSize))
         }
+        for square in squares {
+            bounds = bounds.union(squareBounds(for: square, imageSize: imageSize))
+        }
         return bounds
     }
 
-    /// Includes the arrow currently being dragged out, before it is committed.
+    /// Includes the annotation currently being dragged out, before it is committed.
     private var contentBoundsForCamera: CGRect {
         guard let screenshot else { return .zero }
         var bounds = contentBounds
-        if case .drawing(let start)? = dragMode, let pointerPosition {
-            let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
-            bounds = bounds.union(arrowBounds(
-                for: Arrow(
-                    start: start,
-                    end: pointerPosition,
-                    color: currentColor,
-                    thickness: currentThickness
-                ),
-                imageSize: imageSize
-            ))
+        let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
+        if let pointerPosition {
+            switch dragMode {
+            case .drawingArrow(let start)?:
+                bounds = bounds.union(arrowBounds(
+                    for: Arrow(
+                        start: start,
+                        end: pointerPosition,
+                        color: currentColor,
+                        thickness: currentThickness
+                    ),
+                    imageSize: imageSize
+                ))
+            case .drawingSquare(let start)?:
+                bounds = bounds.union(squareBounds(
+                    for: Square(
+                        rect: normalizedRect(from: start, to: pointerPosition),
+                        color: currentColor,
+                        thickness: currentThickness,
+                        isRounded: currentRounded,
+                        fill: currentFill
+                    ),
+                    imageSize: imageSize
+                ))
+            default:
+                break
+            }
         }
         return bounds
     }
@@ -1478,6 +2058,9 @@ private final class AnnotationCanvasView: NSView {
         for arrow in arrows {
             exportBounds = exportBounds.union(arrowBounds(for: arrow, imageSize: imageSize))
         }
+        for square in squares {
+            exportBounds = exportBounds.union(squareBounds(for: square, imageSize: imageSize))
+        }
 
         let originX = floor(exportBounds.minX)
         let originY = floor(exportBounds.minY)
@@ -1506,6 +2089,41 @@ private final class AnnotationCanvasView: NSView {
         ))
 
         context.setLineCap(.round)
+        context.setLineJoin(.round)
+
+        // Squares render below arrows, matching the editor.
+        for square in squares {
+            let lineWidth = ArrowGeometry.lineWidth(
+                forImageSize: imageSize,
+                thickness: square.thickness
+            )
+            let rect = exportRect(
+                square.rect,
+                originX: originX,
+                originY: originY,
+                exportHeight: exportHeight
+            )
+            let path = squareCGPath(
+                for: rect,
+                rounded: square.isRounded,
+                lineWidth: lineWidth
+            )
+            let fillAlpha = square.fill.fillAlpha
+            if fillAlpha > 0 {
+                context.setFillColor(
+                    square.color.cgColor.copy(alpha: fillAlpha) ?? square.color.cgColor
+                )
+                context.addPath(path)
+                context.fillPath()
+            }
+            // The border is always drawn at full opacity.
+            context.setLineJoin(square.isRounded ? .round : .miter)
+            context.setStrokeColor(square.color.cgColor)
+            context.setLineWidth(lineWidth)
+            context.addPath(path)
+            context.strokePath()
+        }
+
         context.setLineJoin(.round)
 
         for arrow in arrows {
@@ -1542,6 +2160,41 @@ private final class AnnotationCanvasView: NSView {
         )
         let strokePadding = lineWidth / 2 + 1
         return path.bounds.insetBy(dx: -strokePadding, dy: -strokePadding)
+    }
+
+    /// Bounds of a square including its stroke, in image units.
+    private func squareBounds(for square: Square, imageSize: CGSize) -> CGRect {
+        let lineWidth = ArrowGeometry.lineWidth(forImageSize: imageSize, thickness: square.thickness)
+        let strokePadding = lineWidth / 2 + 1
+        return square.rect.insetBy(dx: -strokePadding, dy: -strokePadding)
+    }
+
+    private func squareCGPath(for rect: CGRect, rounded: Bool, lineWidth: CGFloat) -> CGPath {
+        let inset = lineWidth / 2
+        let base = rect.insetBy(dx: inset, dy: inset)
+        guard base.width > 0, base.height > 0 else { return CGMutablePath() }
+        guard rounded else { return CGPath(rect: base, transform: nil) }
+        let radius = min(base.width, base.height) * 0.16
+        return CGPath(
+            roundedRect: base,
+            cornerWidth: radius,
+            cornerHeight: radius,
+            transform: nil
+        )
+    }
+
+    private func exportRect(
+        _ rect: CGRect,
+        originX: CGFloat,
+        originY: CGFloat,
+        exportHeight: Int
+    ) -> CGRect {
+        CGRect(
+            x: rect.minX - originX,
+            y: CGFloat(exportHeight) + originY - rect.maxY,
+            width: rect.width,
+            height: rect.height
+        )
     }
 
     private func exportPoint(
