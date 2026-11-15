@@ -175,7 +175,7 @@ enum ArrowPreferences {
 }
 
 /// Fill choices for the text tool. `clear` renders plain text without a
-/// speech bubble or tail; every other case fills a bubble behind the text.
+/// background; every other case fills a rectangle behind the text.
 enum TextBackground: Int, CaseIterable {
     case clear
     case white
@@ -186,10 +186,10 @@ enum TextBackground: Int, CaseIterable {
     var title: String {
         switch self {
         case .clear: "No background"
-        case .white: "White bubble"
-        case .yellow: "Yellow bubble"
-        case .black: "Black bubble"
-        case .blue: "Blue bubble"
+        case .white: "White background"
+        case .yellow: "Yellow background"
+        case .black: "Black background"
+        case .blue: "Blue background"
         }
     }
 
@@ -327,7 +327,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         toolTip: "Blur tool: drag over an area to blur it. Click again to stop drawing."
     )
     private let textButton = ToolStripButton(
-        symbolName: "text.bubble",
+        symbolName: "character.cursor.ibeam",
         toolTip: "Text tool: click the canvas to add text. Drag text to move it; double-click to edit."
     )
 
@@ -1066,7 +1066,7 @@ private final class ArrowOptionsPanel: NSView {
 
     /// Lays out the controls for the current mode and resizes the panel to fit.
     /// Arrow mode shows color and thickness; square mode adds the corners and
-    /// fill levels; text mode shows text color, bubble background, and size.
+    /// fill levels; text mode shows text color, background color, and size.
     private func layoutControls() {
         let showsThickness = mode == .arrow || mode == .square
         let showsSquareControls = mode == .square
@@ -1306,21 +1306,14 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     /// A single-line text annotation. `origin` is the top-left of the text in
-    /// image units; the bubble is derived from the text metrics. `tailTip` is
-    /// the apex of the speech-bubble tail in image units, and the base of the
-    /// tail attaches to whichever side of the bubble is nearest to it.
+    /// image units; the optional background rectangle is derived from the text
+    /// metrics at draw time.
     private struct TextNote {
         var origin: CGPoint
         var text: String
         var fontSize: CGFloat
         var color: ArrowColor
         var background: TextBackground
-        var tailTip: CGPoint
-    }
-
-    private struct TextLayout {
-        var bubbleRect: CGRect
-        var tail: (a: CGPoint, b: CGPoint, tip: CGPoint)?
     }
 
     private enum Selection {
@@ -1349,7 +1342,6 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case resizingSquare(index: Int, original: CGRect, corner: SquareCorner)
         case resizingBlur(index: Int, original: CGRect, corner: SquareCorner)
         case movingText(index: Int, original: TextNote, grabOffset: CGPoint)
-        case movingTextTail(index: Int)
     }
 
     private enum HitTarget {
@@ -1361,7 +1353,6 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case blurCorner(Int, SquareCorner)
         case blurBody(Int)
         case textBody(Int)
-        case textTail(Int)
     }
 
     private let handleRadius: CGFloat = 6
@@ -1388,6 +1379,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var editingTextIndex: Int?
     private var editingOriginalText = ""
     private var editingIsNew = false
+    private var isPreparingTextEditor = false
     private var trackingArea: NSTrackingArea?
     private let optionsPanel = ArrowOptionsPanel()
     private var blurredScreenshot: CGImage?
@@ -1491,6 +1483,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
         updateOptionsVisibility()
+        window?.invalidateCursorRects(for: self)
+        updateCursor(at: .zero)
         needsDisplay = true
     }
 
@@ -1832,25 +1826,12 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     private func drawHandles(for note: TextNote) {
-        let layout = textLayout(for: note)
-        let bubble = viewRect(for: layout.bubbleRect)
-        let outline = NSBezierPath(rect: bubble.insetBy(dx: -2, dy: -2))
+        let background = viewRect(for: textBackgroundRect(for: note))
+        let outline = NSBezierPath(rect: background.insetBy(dx: -2, dy: -2))
         outline.setLineDash([4, 3], count: 2, phase: 0)
         NSColor.controlAccentColor.withAlphaComponent(0.9).setStroke()
         outline.lineWidth = 1
         outline.stroke()
-
-        if let tail = layout.tail {
-            let tip = contentToView(tail.tip)
-            let handle = NSBezierPath(
-                ovalIn: NSRect(x: tip.x - 5, y: tip.y - 5, width: 10, height: 10)
-            )
-            NSColor.white.setFill()
-            handle.fill()
-            NSColor.controlAccentColor.setStroke()
-            handle.lineWidth = 2
-            handle.stroke()
-        }
     }
 
     // MARK: Text layout and drawing
@@ -1865,61 +1846,18 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         .systemFont(ofSize: note.fontSize * scale, weight: .semibold)
     }
 
-    /// Measures the text and derives the bubble rectangle and tail in image
-    /// units. The tail attaches to the side of the bubble nearest the tip.
-    private func textLayout(for note: TextNote) -> TextLayout {
+    /// Rectangle around the text, in image units. It doubles as the optional
+    /// background and as the click target for moving a note.
+    private func textBackgroundRect(for note: TextNote) -> CGRect {
         let font = textFont(for: note)
         let textSize = (note.text as NSString).size(withAttributes: [.font: font])
         let padding = note.fontSize * 0.45
-        let bubble = CGRect(
+        return CGRect(
             x: note.origin.x - padding,
             y: note.origin.y - padding,
             width: max(textSize.width, note.fontSize * 0.5) + padding * 2,
             height: textSize.height + padding * 2
         )
-
-        guard note.background.nsColor != nil else {
-            return TextLayout(bubbleRect: bubble, tail: nil)
-        }
-
-        let tip = note.tailTip
-        guard !bubble.insetBy(dx: -1, dy: -1).contains(tip) else {
-            return TextLayout(bubbleRect: bubble, tail: nil)
-        }
-
-        let baseWidth = max(note.fontSize * 0.8, 10)
-        let dx = tip.x - bubble.midX
-        let dy = tip.y - bubble.midY
-
-        if abs(dx) > abs(dy) {
-            // Left or right side.
-            let low = bubble.minY + baseWidth / 2 + 1
-            let high = bubble.maxY - baseWidth / 2 - 1
-            let y = high >= low ? min(max(tip.y, low), high) : bubble.midY
-            let x = dx < 0 ? bubble.minX : bubble.maxX
-            return TextLayout(
-                bubbleRect: bubble,
-                tail: (
-                    CGPoint(x: x, y: y - baseWidth / 2),
-                    CGPoint(x: x, y: y + baseWidth / 2),
-                    tip
-                )
-            )
-        } else {
-            // Top or bottom side.
-            let low = bubble.minX + baseWidth / 2 + 1
-            let high = bubble.maxX - baseWidth / 2 - 1
-            let x = high >= low ? min(max(tip.x, low), high) : bubble.midX
-            let y = dy < 0 ? bubble.minY : bubble.maxY
-            return TextLayout(
-                bubbleRect: bubble,
-                tail: (
-                    CGPoint(x: x - baseWidth / 2, y: y),
-                    CGPoint(x: x + baseWidth / 2, y: y),
-                    tip
-                )
-            )
-        }
     }
 
     private func drawTextNote(
@@ -1928,31 +1866,17 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         scale: CGFloat
     ) {
         guard !note.text.isEmpty else { return }
-        let layout = textLayout(for: note)
-        let bubble = transformedRect(layout.bubbleRect, transform: transform, scale: scale)
-        let radius = min(bubble.width, bubble.height) * 0.22
 
         if let background = note.background.nsColor {
-            let path = NSBezierPath(
-                roundedRect: bubble,
-                xRadius: radius,
-                yRadius: radius
+            let rect = transformedRect(
+                textBackgroundRect(for: note),
+                transform: transform,
+                scale: scale
             )
-            if let tail = layout.tail {
-                let triangle = NSBezierPath()
-                triangle.move(to: transform(tail.a))
-                triangle.line(to: transform(tail.b))
-                triangle.line(to: transform(tail.tip))
-                triangle.close()
-                path.append(triangle)
-            }
+            let radius = max(1, note.fontSize * 0.12 * scale)
+            let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
             background.setFill()
             path.fill()
-
-            // A soft border keeps light bubbles visible on light captures.
-            note.color.nsColor.withAlphaComponent(0.25).setStroke()
-            path.lineWidth = max(1, scale)
-            path.stroke()
         }
 
         let font = textFont(for: note, scale: scale)
@@ -1978,17 +1902,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     private func textBounds(for note: TextNote) -> CGRect {
-        let layout = textLayout(for: note)
-        var bounds = layout.bubbleRect.insetBy(dx: -2, dy: -2)
-        if let tail = layout.tail {
-            bounds = bounds.union(CGRect(
-                x: tail.tip.x - 2,
-                y: tail.tip.y - 2,
-                width: 4,
-                height: 4
-            ))
-        }
-        return bounds
+        textBackgroundRect(for: note).insetBy(dx: -2, dy: -2)
     }
 
     // MARK: Text editing
@@ -1999,8 +1913,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             text: "",
             fontSize: baseTextFontSize() * currentTextScale,
             color: currentTextColor,
-            background: currentTextBackground,
-            tailTip: point
+            background: currentTextBackground
         )
         textNotes.append(note)
         let index = textNotes.count - 1
@@ -2034,8 +1947,16 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         textEditor = field
         addSubview(field)
         positionTextEditor()
+
+        // Starting editing can post a spurious end-editing notification for the
+        // field that is being set up. Ignore those so the new, still-empty note
+        // is not committed and removed before the user can type.
+        isPreparingTextEditor = true
         window?.makeFirstResponder(field)
-        field.selectText(nil)
+        if let editor = field.currentEditor() as? NSTextView {
+            editor.selectedRange = NSRange(location: 0, length: field.stringValue.count)
+        }
+        isPreparingTextEditor = false
         needsDisplay = true
     }
 
@@ -2057,25 +1978,17 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     func commitTextEditing() {
-        guard let index = editingTextIndex else { return }
-        let text = textEditor?.stringValue ?? ""
+        guard let index = editingTextIndex,
+              let field = textEditor,
+              !isPreparingTextEditor else { return }
+        let text = field.stringValue
 
         if textNotes.indices.contains(index) {
             if text.isEmpty {
                 textNotes.remove(at: index)
                 selection = nil
             } else {
-                let wasNew = editingIsNew
                 textNotes[index].text = text
-                if wasNew {
-                    // Default the tail to point down and slightly left, so a
-                    // fresh bubble clearly reads as a speech bubble.
-                    let layout = textLayout(for: textNotes[index])
-                    textNotes[index].tailTip = CGPoint(
-                        x: layout.bubbleRect.minX + layout.bubbleRect.width * 0.25,
-                        y: layout.bubbleRect.maxY + textNotes[index].fontSize * 1.3
-                    )
-                }
             }
         }
 
@@ -2115,10 +2028,16 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     func controlTextDidEndEditing(_ notification: Notification) {
+        guard !isPreparingTextEditor,
+              let field = textEditor,
+              (notification.object as? NSTextField) === field else { return }
         commitTextEditing()
     }
 
     func controlTextDidChange(_ notification: Notification) {
+        guard !isPreparingTextEditor,
+              let field = textEditor,
+              (notification.object as? NSTextField) === field else { return }
         positionTextEditor()
         needsDisplay = true
     }
@@ -2224,9 +2143,6 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                         )
                     )
                 }
-            case .textTail(let index):
-                selectText(at: index)
-                dragMode = .movingTextTail(index: index)
             }
         } else {
             selection = nil
@@ -2333,13 +2249,6 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 x: original.origin.x + dx,
                 y: original.origin.y + dy
             )
-            textNotes[index].tailTip = CGPoint(
-                x: original.tailTip.x + dx,
-                y: original.tailTip.y + dy
-            )
-        case .movingTextTail(let index):
-            guard textNotes.indices.contains(index) else { break }
-            textNotes[index].tailTip = point
         }
 
         needsDisplay = true
@@ -2486,11 +2395,20 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
-        NSCursor.arrow.set()
+        updateCursor(at: .zero)
     }
 
     private func updateCursor(at _: CGPoint) {
-        NSCursor.arrow.set()
+        if activeTool == .text {
+            NSCursor.iBeam.set()
+        } else {
+            NSCursor.arrow.set()
+        }
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: activeTool == .text ? .iBeam : .arrow)
     }
 
     // MARK: Selection and style
@@ -2595,20 +2513,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         currentTextBackground = background
         TextPreferences.background = background
         if case .text(let index)? = selection, textNotes.indices.contains(index) {
-            let previous = textNotes[index].background
             textNotes[index].background = background
             if editingTextIndex == index {
                 textEditor?.backgroundColor = background.nsColor
                     ?? NSColor.textBackgroundColor.withAlphaComponent(0.12)
-            }
-            // Going from plain text to a bubble needs a default tail so it
-            // reads as a speech bubble. Keep any tail the user already placed.
-            if previous == .clear, background.nsColor != nil {
-                let layout = textLayout(for: textNotes[index])
-                textNotes[index].tailTip = CGPoint(
-                    x: layout.bubbleRect.minX + layout.bubbleRect.width * 0.25,
-                    y: layout.bubbleRect.maxY + textNotes[index].fontSize * 1.3
-                )
             }
         }
         needsDisplay = true
@@ -2786,20 +2694,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         // shapes can still be drawn over a note.
         if activeTool == nil || activeTool == .text {
             for index in textNotes.indices.reversed() where index != editingTextIndex {
-                let note = textNotes[index]
-                let layout = textLayout(for: note)
-                if let tail = layout.tail {
-                    let tip = contentToView(tail.tip)
-                    let baseA = contentToView(tail.a)
-                    let baseB = contentToView(tail.b)
-                    if distance(from: point, to: tip) <= endpointTolerance + 3
-                        || distance(from: point, toSegmentFrom: baseA, to: tip) <= 8
-                        || distance(from: point, toSegmentFrom: baseB, to: tip) <= 8 {
-                        return .textTail(index)
-                    }
-                }
-                let bubble = viewRect(for: layout.bubbleRect).insetBy(dx: -3, dy: -3)
-                if bubble.contains(point) {
+                let background = viewRect(for: textBackgroundRect(for: textNotes[index]))
+                if background.insetBy(dx: -3, dy: -3).contains(point) {
                     return .textBody(index)
                 }
             }
