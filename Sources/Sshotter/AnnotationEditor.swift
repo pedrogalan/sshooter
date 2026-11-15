@@ -47,6 +47,7 @@ enum ArrowColor: Int, CaseIterable {
     case blue
     case purple
     case black
+    case white
 
     var title: String {
         switch self {
@@ -57,6 +58,7 @@ enum ArrowColor: Int, CaseIterable {
         case .blue: "Blue"
         case .purple: "Purple"
         case .black: "Black"
+        case .white: "White"
         }
     }
 
@@ -69,6 +71,7 @@ enum ArrowColor: Int, CaseIterable {
         case .blue: .systemBlue
         case .purple: .systemPurple
         case .black: .black
+        case .white: .white
         }
     }
 
@@ -81,6 +84,7 @@ enum AnnotationTool {
     case arrow
     case square
     case blur
+    case text
 }
 
 /// Fill levels for the square tool. `full` means fully transparent (outline
@@ -170,6 +174,83 @@ enum ArrowPreferences {
     }
 }
 
+/// Fill choices for the text tool. `clear` renders plain text without a
+/// speech bubble or tail; every other case fills a bubble behind the text.
+enum TextBackground: Int, CaseIterable {
+    case clear
+    case white
+    case yellow
+    case black
+    case blue
+
+    var title: String {
+        switch self {
+        case .clear: "No background"
+        case .white: "White bubble"
+        case .yellow: "Yellow bubble"
+        case .black: "Black bubble"
+        case .blue: "Blue bubble"
+        }
+    }
+
+    var nsColor: NSColor? {
+        switch self {
+        case .clear: nil
+        case .white: .white
+        case .yellow: .systemYellow
+        case .black: .black
+        case .blue: .systemBlue
+        }
+    }
+}
+
+enum TextPreferences {
+    private static let colorKey = "textColor"
+    private static let backgroundKey = "textBackground"
+    private static let scaleKey = "textScale"
+
+    static var color: ArrowColor {
+        get {
+            let defaults = UserDefaults.standard
+            guard defaults.object(forKey: colorKey) != nil,
+                  let value = ArrowColor(rawValue: defaults.integer(forKey: colorKey)) else {
+                return .black
+            }
+            return value
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: colorKey)
+        }
+    }
+
+    static var background: TextBackground {
+        get {
+            let defaults = UserDefaults.standard
+            guard defaults.object(forKey: backgroundKey) != nil,
+                  let value = TextBackground(rawValue: defaults.integer(forKey: backgroundKey)) else {
+                return .white
+            }
+            return value
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: backgroundKey)
+        }
+    }
+
+    /// Multiplier applied to the image-relative base font size.
+    static var scale: CGFloat {
+        get {
+            let defaults = UserDefaults.standard
+            guard defaults.object(forKey: scaleKey) != nil else { return 1 }
+            let value = defaults.double(forKey: scaleKey)
+            return min(max(value, 0.35), 4)
+        }
+        set {
+            UserDefaults.standard.set(Double(newValue), forKey: scaleKey)
+        }
+    }
+}
+
 enum ArrowGeometry {
     static func lineWidth(forImageSize size: CGSize, thickness: ArrowLineWidth) -> CGFloat {
         let base = max(3, min(size.width, size.height) * 0.003)
@@ -245,6 +326,10 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         symbolName: "camera.filters",
         toolTip: "Blur tool: drag over an area to blur it. Click again to stop drawing."
     )
+    private let textButton = ToolStripButton(
+        symbolName: "text.bubble",
+        toolTip: "Text tool: click the canvas to add text. Drag text to move it; double-click to edit."
+    )
 
     init(
         onCopy: @escaping @MainActor (NSImage) -> Void,
@@ -275,6 +360,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         arrowButton.setActive(true)
         squareButton.setActive(false)
         blurButton.setActive(false)
+        textButton.setActive(false)
     }
 
     // MARK: Setup
@@ -306,6 +392,11 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         blurButton.target = self
         blurButton.action = #selector(toggleBlurTool(_:))
         toolStrip.addSubview(blurButton)
+
+        textButton.frame = NSRect(x: 238, y: 8, width: 40, height: 32)
+        textButton.target = self
+        textButton.action = #selector(toggleTextTool(_:))
+        toolStrip.addSubview(textButton)
 
         container.addSubview(toolStrip)
         NSLayoutConstraint.activate([
@@ -370,12 +461,17 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         toggleTool(.blur)
     }
 
+    @objc private func toggleTextTool(_ sender: Any?) {
+        toggleTool(.text)
+    }
+
     private func toggleTool(_ tool: AnnotationTool) {
         if canvas.activeTool == tool {
             canvas.setTool(nil)
             arrowButton.setActive(false)
             squareButton.setActive(false)
             blurButton.setActive(false)
+            textButton.setActive(false)
         } else {
             selectTool(tool)
         }
@@ -387,6 +483,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         arrowButton.setActive(tool == .arrow)
         squareButton.setActive(tool == .square)
         blurButton.setActive(tool == .blur)
+        textButton.setActive(tool == .text)
     }
 
     @objc func copyScreenshot(_ sender: Any?) {
@@ -413,6 +510,10 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.keyCode == 53 {
+            if canvas.isEditingText {
+                canvas.cancelActiveTextEditing()
+                return true
+            }
             if canvas.handleEscape() { return true }
             close()
             return true
@@ -437,6 +538,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         // Keep the capture, annotations, title, and camera intact so the status
         // menu can reopen the editor exactly where it was left.
+        canvas.commitTextEditing()
         onClose()
     }
 
@@ -746,6 +848,96 @@ private final class FillLevelButton: HoverButton {
     }
 }
 
+@MainActor
+private final class BackgroundSwatchButton: HoverButton {
+    let background: TextBackground
+    private(set) var isSelected = false {
+        didSet { needsDisplay = true }
+    }
+
+    init(background: TextBackground) {
+        self.background = background
+        super.init(frame: .zero)
+        toolTip = background.title
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func setSelected(_ selected: Bool) {
+        isSelected = selected
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isHovered {
+            NSColor.labelColor.withAlphaComponent(0.08).setFill()
+            NSBezierPath(ovalIn: bounds.insetBy(dx: 0.5, dy: 0.5)).fill()
+        }
+
+        let dot = NSBezierPath(ovalIn: bounds.insetBy(dx: 3.5, dy: 3.5))
+        if let color = background.nsColor {
+            color.setFill()
+            dot.fill()
+        }
+        NSColor.separatorColor.setStroke()
+        dot.lineWidth = 1
+        dot.stroke()
+
+        if background.nsColor == nil {
+            // A slash marks the "no background" choice.
+            let slash = NSBezierPath()
+            slash.move(to: NSPoint(x: bounds.minX + 6, y: bounds.maxY - 6))
+            slash.line(to: NSPoint(x: bounds.maxX - 6, y: bounds.minY + 6))
+            slash.lineWidth = 1.5
+            NSColor.labelColor.setStroke()
+            slash.stroke()
+        }
+
+        if isSelected {
+            let ring = NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1))
+            NSColor.controlAccentColor.setStroke()
+            ring.lineWidth = 2
+            ring.stroke()
+        }
+    }
+}
+
+@MainActor
+private final class TextSizeButton: HoverButton {
+    let increases: Bool
+
+    init(increase: Bool) {
+        increases = increase
+        super.init(frame: .zero)
+        toolTip = increase ? "Increase text size" : "Decrease text size"
+        let configuration = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        image = NSImage(
+            systemSymbolName: increase ? "textformat.size.larger" : "textformat.size.smaller",
+            accessibilityDescription: toolTip
+        )?.withSymbolConfiguration(configuration)
+        imageScaling = .scaleProportionallyDown
+        imagePosition = .imageOnly
+        contentTintColor = .labelColor
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isHovered {
+            NSColor.labelColor.withAlphaComponent(0.07).setFill()
+            NSBezierPath(
+                roundedRect: bounds.insetBy(dx: 1, dy: 1),
+                xRadius: 6,
+                yRadius: 6
+            ).fill()
+        }
+        super.draw(dirtyRect)
+    }
+}
+
 // MARK: - Options panel
 
 @MainActor
@@ -753,6 +945,7 @@ private final class ArrowOptionsPanel: NSView {
     enum Mode {
         case arrow
         case square
+        case text
     }
 
     private static let swatchSize: CGFloat = 22
@@ -768,16 +961,25 @@ private final class ArrowOptionsPanel: NSView {
     var onThicknessSelected: (@MainActor (ArrowLineWidth) -> Void)?
     var onRoundedChanged: (@MainActor (Bool) -> Void)?
     var onFillChanged: (@MainActor (SquareFill) -> Void)?
+    var onTextColorSelected: (@MainActor (ArrowColor) -> Void)?
+    var onBackgroundSelected: (@MainActor (TextBackground) -> Void)?
+    var onTextSizeChanged: (@MainActor (Bool) -> Void)?
 
     private(set) var mode: Mode = .arrow
     private var swatchButtons: [ColorSwatchButton] = []
     private var thicknessButtons: [ThicknessButton] = []
     private let colorDivider = NSBox()
     private let squareDivider = NSBox()
+    private let textDivider = NSBox()
     private let roundedButton = RoundedCornerButton()
     private var fillButtons: [FillLevelButton] = []
+    private var backgroundButtons: [BackgroundSwatchButton] = []
+    private var sizeDecreaseButton = TextSizeButton(increase: false)
+    private var sizeIncreaseButton = TextSizeButton(increase: true)
     private var isRounded = SquarePreferences.isRounded
     private var fill = SquarePreferences.fill
+    private var textColor = TextPreferences.color
+    private var textBackground = TextPreferences.background
 
     override var isFlipped: Bool { false }
 
@@ -838,20 +1040,52 @@ private final class ArrowOptionsPanel: NSView {
             fillButtons.append(button)
         }
 
+        textDivider.boxType = .separator
+        addSubview(textDivider)
+
+        for background in TextBackground.allCases {
+            let button = BackgroundSwatchButton(background: background)
+            button.target = self
+            button.action = #selector(selectBackground(_:))
+            addSubview(button)
+            backgroundButtons.append(button)
+        }
+
+        sizeDecreaseButton.target = self
+        sizeDecreaseButton.action = #selector(changeTextSize(_:))
+        addSubview(sizeDecreaseButton)
+
+        sizeIncreaseButton.target = self
+        sizeIncreaseButton.action = #selector(changeTextSize(_:))
+        addSubview(sizeIncreaseButton)
+
         updateSquareSelection(isRounded: isRounded, fill: fill)
+        updateTextSelection(color: textColor, background: textBackground)
         layoutControls()
     }
 
     /// Lays out the controls for the current mode and resizes the panel to fit.
-    /// Arrow mode stops after the thickness buttons; square mode also shows the
-    /// rounded-corner toggle and the fill levels.
+    /// Arrow mode shows color and thickness; square mode adds the corners and
+    /// fill levels; text mode shows text color, bubble background, and size.
     private func layoutControls() {
+        let showsThickness = mode == .arrow || mode == .square
         let showsSquareControls = mode == .square
+        let showsTextControls = mode == .text
+
+        for button in thicknessButtons {
+            button.isHidden = !showsThickness
+        }
         squareDivider.isHidden = !showsSquareControls
         roundedButton.isHidden = !showsSquareControls
         for button in fillButtons {
             button.isHidden = !showsSquareControls
         }
+        textDivider.isHidden = !showsTextControls
+        for button in backgroundButtons {
+            button.isHidden = !showsTextControls
+        }
+        sizeDecreaseButton.isHidden = !showsTextControls
+        sizeIncreaseButton.isHidden = !showsTextControls
 
         var x = Self.horizontalPadding
 
@@ -869,14 +1103,16 @@ private final class ArrowOptionsPanel: NSView {
         colorDivider.frame = NSRect(x: x, y: 10, width: 1, height: Self.panelHeight - 20)
         x += 1 + Self.dividerGap
 
-        for button in thicknessButtons {
-            button.frame = NSRect(
-                x: x,
-                y: (Self.panelHeight - Self.thicknessSize) / 2,
-                width: Self.thicknessSize,
-                height: Self.thicknessSize
-            )
-            x += Self.thicknessSize + Self.thicknessSpacing
+        if showsThickness {
+            for button in thicknessButtons {
+                button.frame = NSRect(
+                    x: x,
+                    y: (Self.panelHeight - Self.thicknessSize) / 2,
+                    width: Self.thicknessSize,
+                    height: Self.thicknessSize
+                )
+                x += Self.thicknessSize + Self.thicknessSpacing
+            }
         }
 
         if showsSquareControls {
@@ -893,6 +1129,32 @@ private final class ArrowOptionsPanel: NSView {
             x += Self.thicknessSize + Self.roundedGap
 
             for button in fillButtons {
+                button.frame = NSRect(
+                    x: x,
+                    y: (Self.panelHeight - Self.thicknessSize) / 2,
+                    width: Self.thicknessSize,
+                    height: Self.thicknessSize
+                )
+                x += Self.thicknessSize + Self.thicknessSpacing
+            }
+        }
+
+        if showsTextControls {
+            for button in backgroundButtons {
+                button.frame = NSRect(
+                    x: x,
+                    y: (Self.panelHeight - Self.swatchSize) / 2,
+                    width: Self.swatchSize,
+                    height: Self.swatchSize
+                )
+                x += Self.swatchSize + Self.swatchSpacing
+            }
+
+            x += Self.dividerGap - Self.swatchSpacing
+            textDivider.frame = NSRect(x: x, y: 10, width: 1, height: Self.panelHeight - 20)
+            x += 1 + Self.dividerGap
+
+            for button in [sizeDecreaseButton, sizeIncreaseButton] {
                 button.frame = NSRect(
                     x: x,
                     y: (Self.panelHeight - Self.thicknessSize) / 2,
@@ -926,6 +1188,17 @@ private final class ArrowOptionsPanel: NSView {
         }
     }
 
+    func updateTextSelection(color: ArrowColor, background: TextBackground) {
+        textColor = color
+        textBackground = background
+        for button in swatchButtons {
+            button.setSelected(button.tag == color.rawValue)
+        }
+        for button in backgroundButtons {
+            button.setSelected(button.background == background)
+        }
+    }
+
     @objc private func toggleRounded(_ sender: Any?) {
         isRounded.toggle()
         roundedButton.setSelected(isRounded)
@@ -942,8 +1215,22 @@ private final class ArrowOptionsPanel: NSView {
 
     @objc private func selectColor(_ sender: NSButton) {
         guard let color = ArrowColor(rawValue: sender.tag) else { return }
-        updateSelection(color: color, thickness: currentThicknessFromButtons())
-        onColorSelected?(color)
+        if mode == .text {
+            updateTextSelection(color: color, background: textBackground)
+            onTextColorSelected?(color)
+        } else {
+            updateSelection(color: color, thickness: currentThicknessFromButtons())
+            onColorSelected?(color)
+        }
+    }
+
+    @objc private func selectBackground(_ sender: BackgroundSwatchButton) {
+        updateTextSelection(color: textColor, background: sender.background)
+        onBackgroundSelected?(sender.background)
+    }
+
+    @objc private func changeTextSize(_ sender: TextSizeButton) {
+        onTextSizeChanged?(sender.increases)
     }
 
     @objc private func selectThickness(_ sender: NSButton) {
@@ -998,7 +1285,7 @@ private final class ArrowOptionsPanel: NSView {
 // MARK: - Canvas
 
 @MainActor
-private final class AnnotationCanvasView: NSView {
+private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private struct Arrow {
         var start: CGPoint
         var end: CGPoint
@@ -1018,10 +1305,29 @@ private final class AnnotationCanvasView: NSView {
         var rect: CGRect
     }
 
+    /// A single-line text annotation. `origin` is the top-left of the text in
+    /// image units; the bubble is derived from the text metrics. `tailTip` is
+    /// the apex of the speech-bubble tail in image units, and the base of the
+    /// tail attaches to whichever side of the bubble is nearest to it.
+    private struct TextNote {
+        var origin: CGPoint
+        var text: String
+        var fontSize: CGFloat
+        var color: ArrowColor
+        var background: TextBackground
+        var tailTip: CGPoint
+    }
+
+    private struct TextLayout {
+        var bubbleRect: CGRect
+        var tail: (a: CGPoint, b: CGPoint, tip: CGPoint)?
+    }
+
     private enum Selection {
         case arrow(Int)
         case square(Int)
         case blur(Int)
+        case text(Int)
     }
 
     private enum SquareCorner {
@@ -1042,6 +1348,8 @@ private final class AnnotationCanvasView: NSView {
         case resizingEnd(index: Int)
         case resizingSquare(index: Int, original: CGRect, corner: SquareCorner)
         case resizingBlur(index: Int, original: CGRect, corner: SquareCorner)
+        case movingText(index: Int, original: TextNote, grabOffset: CGPoint)
+        case movingTextTail(index: Int)
     }
 
     private enum HitTarget {
@@ -1052,6 +1360,8 @@ private final class AnnotationCanvasView: NSView {
         case squareBody(Int)
         case blurCorner(Int, SquareCorner)
         case blurBody(Int)
+        case textBody(Int)
+        case textTail(Int)
     }
 
     private let handleRadius: CGFloat = 6
@@ -1063,6 +1373,7 @@ private final class AnnotationCanvasView: NSView {
     private var arrows: [Arrow] = []
     private var squares: [Square] = []
     private var blurRegions: [BlurRegion] = []
+    private var textNotes: [TextNote] = []
     private var selection: Selection?
     private var dragMode: DragMode?
     private var pointerPosition: CGPoint?
@@ -1070,6 +1381,13 @@ private final class AnnotationCanvasView: NSView {
     private var currentThickness = ArrowPreferences.lineWidth
     private var currentRounded = SquarePreferences.isRounded
     private var currentFill = SquarePreferences.fill
+    private var currentTextColor = TextPreferences.color
+    private var currentTextBackground = TextPreferences.background
+    private var currentTextScale = TextPreferences.scale
+    private var textEditor: NSTextField?
+    private var editingTextIndex: Int?
+    private var editingOriginalText = ""
+    private var editingIsNew = false
     private var trackingArea: NSTrackingArea?
     private let optionsPanel = ArrowOptionsPanel()
     private var blurredScreenshot: CGImage?
@@ -1105,8 +1423,18 @@ private final class AnnotationCanvasView: NSView {
         optionsPanel.onFillChanged = { [weak self] fill in
             self?.applyFill(fill)
         }
+        optionsPanel.onTextColorSelected = { [weak self] color in
+            self?.applyTextColor(color)
+        }
+        optionsPanel.onBackgroundSelected = { [weak self] background in
+            self?.applyTextBackground(background)
+        }
+        optionsPanel.onTextSizeChanged = { [weak self] increase in
+            self?.adjustTextSize(increase: increase)
+        }
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
         addSubview(optionsPanel)
     }
 
@@ -1119,6 +1447,7 @@ private final class AnnotationCanvasView: NSView {
     var hasImage: Bool { screenshot != nil }
 
     func setImage(_ image: CGImage) {
+        commitTextEditing()
         screenshot = image
         screenshotImage = NSImage(
             cgImage: image,
@@ -1128,9 +1457,13 @@ private final class AnnotationCanvasView: NSView {
         currentThickness = ArrowPreferences.lineWidth
         currentRounded = SquarePreferences.isRounded
         currentFill = SquarePreferences.fill
+        currentTextColor = TextPreferences.color
+        currentTextBackground = TextPreferences.background
+        currentTextScale = TextPreferences.scale
         arrows.removeAll()
         squares.removeAll()
         blurRegions.removeAll()
+        textNotes.removeAll()
         blurredScreenshot = nil
         blurredScreenshotImage = nil
         selection = nil
@@ -1139,12 +1472,14 @@ private final class AnnotationCanvasView: NSView {
         hasCamera = false
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
         updateOptionsVisibility(animated: false)
         fitCameraToContent()
         needsDisplay = true
     }
 
     func setTool(_ tool: AnnotationTool?) {
+        commitTextEditing()
         activeTool = tool
         dragMode = nil
         pointerPosition = nil
@@ -1154,6 +1489,7 @@ private final class AnnotationCanvasView: NSView {
         }
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
         updateOptionsVisibility()
         needsDisplay = true
     }
@@ -1170,6 +1506,8 @@ private final class AnnotationCanvasView: NSView {
             width: size.width,
             height: size.height
         )
+
+        positionTextEditor()
 
         // Fit once, as soon as the canvas has a real size. After that the
         // camera only moves through manual zoom/pan or an explicit fit, so
@@ -1255,6 +1593,15 @@ private final class AnnotationCanvasView: NSView {
             )
         }
 
+        // Text sits above every shape annotation so it stays legible.
+        for (index, note) in textNotes.enumerated() where index != editingTextIndex {
+            drawTextNote(
+                note,
+                transform: { self.contentToView($0) },
+                scale: scale
+            )
+        }
+
         // Selection handles always stay visible above every annotation.
         if case .square(let index)? = selection, squares.indices.contains(index) {
             drawHandles(for: squares[index])
@@ -1262,6 +1609,9 @@ private final class AnnotationCanvasView: NSView {
             drawHandles(for: arrows[index])
         } else if case .blur(let index)? = selection, blurRegions.indices.contains(index) {
             drawHandles(for: blurRegions[index])
+        } else if case .text(let index)? = selection, textNotes.indices.contains(index),
+                  index != editingTextIndex {
+            drawHandles(for: textNotes[index])
         }
     }
 
@@ -1481,9 +1831,320 @@ private final class AnnotationCanvasView: NSView {
         }
     }
 
+    private func drawHandles(for note: TextNote) {
+        let layout = textLayout(for: note)
+        let bubble = viewRect(for: layout.bubbleRect)
+        let outline = NSBezierPath(rect: bubble.insetBy(dx: -2, dy: -2))
+        outline.setLineDash([4, 3], count: 2, phase: 0)
+        NSColor.controlAccentColor.withAlphaComponent(0.9).setStroke()
+        outline.lineWidth = 1
+        outline.stroke()
+
+        if let tail = layout.tail {
+            let tip = contentToView(tail.tip)
+            let handle = NSBezierPath(
+                ovalIn: NSRect(x: tip.x - 5, y: tip.y - 5, width: 10, height: 10)
+            )
+            NSColor.white.setFill()
+            handle.fill()
+            NSColor.controlAccentColor.setStroke()
+            handle.lineWidth = 2
+            handle.stroke()
+        }
+    }
+
+    // MARK: Text layout and drawing
+
+    private func baseTextFontSize() -> CGFloat {
+        guard let screenshot else { return 18 }
+        let base = min(CGFloat(screenshot.width), CGFloat(screenshot.height)) * 0.022
+        return min(max(base, 12), 96)
+    }
+
+    private func textFont(for note: TextNote, scale: CGFloat = 1) -> NSFont {
+        .systemFont(ofSize: note.fontSize * scale, weight: .semibold)
+    }
+
+    /// Measures the text and derives the bubble rectangle and tail in image
+    /// units. The tail attaches to the side of the bubble nearest the tip.
+    private func textLayout(for note: TextNote) -> TextLayout {
+        let font = textFont(for: note)
+        let textSize = (note.text as NSString).size(withAttributes: [.font: font])
+        let padding = note.fontSize * 0.45
+        let bubble = CGRect(
+            x: note.origin.x - padding,
+            y: note.origin.y - padding,
+            width: max(textSize.width, note.fontSize * 0.5) + padding * 2,
+            height: textSize.height + padding * 2
+        )
+
+        guard note.background.nsColor != nil else {
+            return TextLayout(bubbleRect: bubble, tail: nil)
+        }
+
+        let tip = note.tailTip
+        guard !bubble.insetBy(dx: -1, dy: -1).contains(tip) else {
+            return TextLayout(bubbleRect: bubble, tail: nil)
+        }
+
+        let baseWidth = max(note.fontSize * 0.8, 10)
+        let dx = tip.x - bubble.midX
+        let dy = tip.y - bubble.midY
+
+        if abs(dx) > abs(dy) {
+            // Left or right side.
+            let low = bubble.minY + baseWidth / 2 + 1
+            let high = bubble.maxY - baseWidth / 2 - 1
+            let y = high >= low ? min(max(tip.y, low), high) : bubble.midY
+            let x = dx < 0 ? bubble.minX : bubble.maxX
+            return TextLayout(
+                bubbleRect: bubble,
+                tail: (
+                    CGPoint(x: x, y: y - baseWidth / 2),
+                    CGPoint(x: x, y: y + baseWidth / 2),
+                    tip
+                )
+            )
+        } else {
+            // Top or bottom side.
+            let low = bubble.minX + baseWidth / 2 + 1
+            let high = bubble.maxX - baseWidth / 2 - 1
+            let x = high >= low ? min(max(tip.x, low), high) : bubble.midX
+            let y = dy < 0 ? bubble.minY : bubble.maxY
+            return TextLayout(
+                bubbleRect: bubble,
+                tail: (
+                    CGPoint(x: x - baseWidth / 2, y: y),
+                    CGPoint(x: x + baseWidth / 2, y: y),
+                    tip
+                )
+            )
+        }
+    }
+
+    private func drawTextNote(
+        _ note: TextNote,
+        transform: (CGPoint) -> CGPoint,
+        scale: CGFloat
+    ) {
+        guard !note.text.isEmpty else { return }
+        let layout = textLayout(for: note)
+        let bubble = transformedRect(layout.bubbleRect, transform: transform, scale: scale)
+        let radius = min(bubble.width, bubble.height) * 0.22
+
+        if let background = note.background.nsColor {
+            let path = NSBezierPath(
+                roundedRect: bubble,
+                xRadius: radius,
+                yRadius: radius
+            )
+            if let tail = layout.tail {
+                let triangle = NSBezierPath()
+                triangle.move(to: transform(tail.a))
+                triangle.line(to: transform(tail.b))
+                triangle.line(to: transform(tail.tip))
+                triangle.close()
+                path.append(triangle)
+            }
+            background.setFill()
+            path.fill()
+
+            // A soft border keeps light bubbles visible on light captures.
+            note.color.nsColor.withAlphaComponent(0.25).setStroke()
+            path.lineWidth = max(1, scale)
+            path.stroke()
+        }
+
+        let font = textFont(for: note, scale: scale)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: note.color.nsColor
+        ]
+        (note.text as NSString).draw(at: transform(note.origin), withAttributes: attributes)
+    }
+
+    private func transformedRect(
+        _ rect: CGRect,
+        transform: (CGPoint) -> CGPoint,
+        scale: CGFloat
+    ) -> CGRect {
+        let origin = transform(rect.origin)
+        return CGRect(
+            x: origin.x,
+            y: origin.y,
+            width: rect.width * scale,
+            height: rect.height * scale
+        )
+    }
+
+    private func textBounds(for note: TextNote) -> CGRect {
+        let layout = textLayout(for: note)
+        var bounds = layout.bubbleRect.insetBy(dx: -2, dy: -2)
+        if let tail = layout.tail {
+            bounds = bounds.union(CGRect(
+                x: tail.tip.x - 2,
+                y: tail.tip.y - 2,
+                width: 4,
+                height: 4
+            ))
+        }
+        return bounds
+    }
+
+    // MARK: Text editing
+
+    private func createTextNote(at point: CGPoint) {
+        let note = TextNote(
+            origin: point,
+            text: "",
+            fontSize: baseTextFontSize() * currentTextScale,
+            color: currentTextColor,
+            background: currentTextBackground,
+            tailTip: point
+        )
+        textNotes.append(note)
+        let index = textNotes.count - 1
+        selection = .text(index)
+        updateOptionsVisibility()
+        beginTextEditing(at: index)
+    }
+
+    private func beginTextEditing(at index: Int) {
+        guard textNotes.indices.contains(index) else { return }
+        endTextEditing(makeCanvasFirstResponder: false)
+
+        editingTextIndex = index
+        editingOriginalText = textNotes[index].text
+        editingIsNew = textNotes[index].text.isEmpty
+
+        let field = NSTextField(frame: .zero)
+        field.delegate = self
+        field.isBordered = false
+        field.isBezeled = false
+        field.drawsBackground = true
+        field.focusRingType = .exterior
+        field.usesSingleLineMode = true
+        field.cell?.wraps = false
+        field.cell?.isScrollable = true
+        field.stringValue = textNotes[index].text
+        field.textColor = textNotes[index].color.nsColor
+        field.backgroundColor = textNotes[index].background.nsColor
+            ?? NSColor.textBackgroundColor.withAlphaComponent(0.12)
+        field.font = textFont(for: textNotes[index], scale: cameraScale)
+        textEditor = field
+        addSubview(field)
+        positionTextEditor()
+        window?.makeFirstResponder(field)
+        field.selectText(nil)
+        needsDisplay = true
+    }
+
+    private func positionTextEditor() {
+        guard let index = editingTextIndex,
+              textNotes.indices.contains(index),
+              let field = textEditor else { return }
+        let note = textNotes[index]
+        let font = textFont(for: note, scale: cameraScale)
+        field.font = font
+        let measured = (field.stringValue as NSString).size(withAttributes: [.font: font])
+        let height = ceil(font.ascender - font.descender + 6)
+        field.frame = NSRect(
+            x: contentToView(note.origin).x,
+            y: contentToView(note.origin).y,
+            width: max(measured.width + 22, 90),
+            height: height
+        )
+    }
+
+    func commitTextEditing() {
+        guard let index = editingTextIndex else { return }
+        let text = textEditor?.stringValue ?? ""
+
+        if textNotes.indices.contains(index) {
+            if text.isEmpty {
+                textNotes.remove(at: index)
+                selection = nil
+            } else {
+                let wasNew = editingIsNew
+                textNotes[index].text = text
+                if wasNew {
+                    // Default the tail to point down and slightly left, so a
+                    // fresh bubble clearly reads as a speech bubble.
+                    let layout = textLayout(for: textNotes[index])
+                    textNotes[index].tailTip = CGPoint(
+                        x: layout.bubbleRect.minX + layout.bubbleRect.width * 0.25,
+                        y: layout.bubbleRect.maxY + textNotes[index].fontSize * 1.3
+                    )
+                }
+            }
+        }
+
+        endTextEditing()
+    }
+
+    private func cancelTextEditing() {
+        guard let index = editingTextIndex else { return }
+        if textNotes.indices.contains(index) {
+            if editingIsNew {
+                textNotes.remove(at: index)
+                selection = nil
+            } else {
+                textNotes[index].text = editingOriginalText
+            }
+        }
+        endTextEditing()
+    }
+
+    var isEditingText: Bool { editingTextIndex != nil }
+
+    func cancelActiveTextEditing() {
+        cancelTextEditing()
+    }
+
+    private func endTextEditing(makeCanvasFirstResponder: Bool = true) {
+        editingTextIndex = nil
+        editingOriginalText = ""
+        editingIsNew = false
+        textEditor?.removeFromSuperview()
+        textEditor = nil
+        if makeCanvasFirstResponder {
+            window?.makeFirstResponder(self)
+        }
+        updateOptionsVisibility()
+        needsDisplay = true
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        commitTextEditing()
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        positionTextEditor()
+        needsDisplay = true
+    }
+
+    func control(
+        _ control: NSControl,
+        textView: NSTextView,
+        doCommandBy commandSelector: Selector
+    ) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            cancelTextEditing()
+            return true
+        }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            commitTextEditing()
+            return true
+        }
+        return false
+    }
+
     // MARK: Mouse handling
 
     override func mouseDown(with event: NSEvent) {
+        if editingTextIndex != nil {
+            commitTextEditing()
+        }
         ensureCamera()
         let pointInView = convert(event.locationInWindow, from: nil)
         guard screenshot != nil, let contentPoint = clampedContentPoint(for: pointInView) else {
@@ -1548,11 +2209,30 @@ private final class AnnotationCanvasView: NSView {
                         y: contentPoint.y - region.rect.minY
                     )
                 )
+            case .textBody(let index):
+                selectText(at: index)
+                if event.clickCount >= 2 {
+                    beginTextEditing(at: index)
+                } else {
+                    let note = textNotes[index]
+                    dragMode = .movingText(
+                        index: index,
+                        original: note,
+                        grabOffset: CGPoint(
+                            x: contentPoint.x - note.origin.x,
+                            y: contentPoint.y - note.origin.y
+                        )
+                    )
+                }
+            case .textTail(let index):
+                selectText(at: index)
+                dragMode = .movingTextTail(index: index)
             }
         } else {
             selection = nil
             optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
             optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+            optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
             updateOptionsVisibility()
             switch activeTool {
             case .some(.arrow):
@@ -1564,6 +2244,10 @@ private final class AnnotationCanvasView: NSView {
             case .some(.blur):
                 dragMode = .drawingBlur(start: contentPoint)
                 pointerPosition = contentPoint
+            case .some(.text):
+                dragMode = nil
+                pointerPosition = nil
+                createTextNote(at: contentPoint)
             case .none:
                 dragMode = nil
             }
@@ -1631,6 +2315,31 @@ private final class AnnotationCanvasView: NSView {
             squares[index].rect = resizedRect(original, corner: corner, to: point)
         case let .resizingBlur(index, original, corner):
             blurRegions[index].rect = resizedRect(original, corner: corner, to: point)
+        case let .movingText(index, original, grabOffset):
+            guard textNotes.indices.contains(index) else { break }
+            let proposedOrigin = CGPoint(
+                x: point.x - grabOffset.x,
+                y: point.y - grabOffset.y
+            )
+            var dx = proposedOrigin.x - original.origin.x
+            var dy = proposedOrigin.y - original.origin.y
+
+            let limits = visibleContentRect
+            let bounds = textBounds(for: original)
+            dx = min(max(dx, limits.minX - bounds.minX), limits.maxX - bounds.maxX)
+            dy = min(max(dy, limits.minY - bounds.minY), limits.maxY - bounds.maxY)
+
+            textNotes[index].origin = CGPoint(
+                x: original.origin.x + dx,
+                y: original.origin.y + dy
+            )
+            textNotes[index].tailTip = CGPoint(
+                x: original.tailTip.x + dx,
+                y: original.tailTip.y + dy
+            )
+        case .movingTextTail(let index):
+            guard textNotes.indices.contains(index) else { break }
+            textNotes[index].tailTip = point
         }
 
         needsDisplay = true
@@ -1727,6 +2436,7 @@ private final class AnnotationCanvasView: NSView {
             // checkerboard fixed to the window.
             cameraCenter.x -= event.scrollingDeltaX / cameraScale
             cameraCenter.y -= event.scrollingDeltaY / cameraScale
+            positionTextEditor()
             needsDisplay = true
         }
     }
@@ -1746,6 +2456,7 @@ private final class AnnotationCanvasView: NSView {
             x: anchor.x - (pointInView.x - bounds.midX) / cameraScale,
             y: anchor.y - (pointInView.y - bounds.midY) / cameraScale
         )
+        positionTextEditor()
         needsDisplay = true
     }
 
@@ -1813,6 +2524,16 @@ private final class AnnotationCanvasView: NSView {
         updateOptionsVisibility()
     }
 
+    private func selectText(at index: Int) {
+        guard textNotes.indices.contains(index) else { return }
+        selection = .text(index)
+        let note = textNotes[index]
+        currentTextColor = note.color
+        currentTextBackground = note.background
+        optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
+        updateOptionsVisibility()
+    }
+
     private func applyColor(_ color: ArrowColor) {
         currentColor = color
         ArrowPreferences.color = color
@@ -1857,6 +2578,57 @@ private final class AnnotationCanvasView: NSView {
         window?.makeFirstResponder(self)
     }
 
+    private func applyTextColor(_ color: ArrowColor) {
+        currentTextColor = color
+        TextPreferences.color = color
+        if case .text(let index)? = selection, textNotes.indices.contains(index) {
+            textNotes[index].color = color
+            if editingTextIndex == index {
+                textEditor?.textColor = color.nsColor
+            }
+        }
+        needsDisplay = true
+        window?.makeFirstResponder(self)
+    }
+
+    private func applyTextBackground(_ background: TextBackground) {
+        currentTextBackground = background
+        TextPreferences.background = background
+        if case .text(let index)? = selection, textNotes.indices.contains(index) {
+            let previous = textNotes[index].background
+            textNotes[index].background = background
+            if editingTextIndex == index {
+                textEditor?.backgroundColor = background.nsColor
+                    ?? NSColor.textBackgroundColor.withAlphaComponent(0.12)
+            }
+            // Going from plain text to a bubble needs a default tail so it
+            // reads as a speech bubble. Keep any tail the user already placed.
+            if previous == .clear, background.nsColor != nil {
+                let layout = textLayout(for: textNotes[index])
+                textNotes[index].tailTip = CGPoint(
+                    x: layout.bubbleRect.minX + layout.bubbleRect.width * 0.25,
+                    y: layout.bubbleRect.maxY + textNotes[index].fontSize * 1.3
+                )
+            }
+        }
+        needsDisplay = true
+        window?.makeFirstResponder(self)
+    }
+
+    private func adjustTextSize(increase: Bool) {
+        currentTextScale = min(
+            max(currentTextScale * (increase ? 1.15 : 1 / 1.15), 0.35),
+            4
+        )
+        TextPreferences.scale = currentTextScale
+        if case .text(let index)? = selection, textNotes.indices.contains(index) {
+            textNotes[index].fontSize = baseTextFontSize() * currentTextScale
+            positionTextEditor()
+        }
+        needsDisplay = true
+        window?.makeFirstResponder(self)
+    }
+
     /// The options bar matches the active tool. When no tool is active it
     /// follows the selected annotation instead. Blur has no options, so it
     /// hides the bar.
@@ -1869,12 +2641,16 @@ private final class AnnotationCanvasView: NSView {
             return .square
         case .some(.blur):
             return nil
+        case .some(.text):
+            return .text
         case .none:
             switch selection {
             case .some(.arrow):
                 return .arrow
             case .some(.square):
                 return .square
+            case .some(.text):
+                return .text
             default:
                 return nil
             }
@@ -1938,6 +2714,9 @@ private final class AnnotationCanvasView: NSView {
         case .blur(let index):
             guard blurRegions.indices.contains(index) else { return false }
             blurRegions.remove(at: index)
+        case .text(let index):
+            guard textNotes.indices.contains(index) else { return false }
+            textNotes.remove(at: index)
         }
         self.selection = nil
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
@@ -1949,6 +2728,10 @@ private final class AnnotationCanvasView: NSView {
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 {
+            if editingTextIndex != nil {
+                cancelTextEditing()
+                return
+            }
             if !handleEscape() {
                 window?.performKeyEquivalent(with: event)
             }
@@ -1997,6 +2780,36 @@ private final class AnnotationCanvasView: NSView {
         let scale = cameraScale
         let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
         let endpointTolerance = handleRadius + 3
+
+        // Text renders above every shape, so it receives clicks first. It only
+        // captures clicks when no tool is active or the text tool is chosen, so
+        // shapes can still be drawn over a note.
+        if activeTool == nil || activeTool == .text {
+            for index in textNotes.indices.reversed() where index != editingTextIndex {
+                let note = textNotes[index]
+                let layout = textLayout(for: note)
+                if let tail = layout.tail {
+                    let tip = contentToView(tail.tip)
+                    let baseA = contentToView(tail.a)
+                    let baseB = contentToView(tail.b)
+                    if distance(from: point, to: tip) <= endpointTolerance + 3
+                        || distance(from: point, toSegmentFrom: baseA, to: tip) <= 8
+                        || distance(from: point, toSegmentFrom: baseB, to: tip) <= 8 {
+                        return .textTail(index)
+                    }
+                }
+                let bubble = viewRect(for: layout.bubbleRect).insetBy(dx: -3, dy: -3)
+                if bubble.contains(point) {
+                    return .textBody(index)
+                }
+            }
+
+            // With the text tool active, a click on empty space must always
+            // create a new note instead of selecting what lies underneath.
+            if activeTool == .text {
+                return nil
+            }
+        }
 
         // Arrows sit in front of squares, so they win when they overlap.
         for index in arrows.indices.reversed() {
@@ -2121,6 +2934,9 @@ private final class AnnotationCanvasView: NSView {
         }
         for region in blurRegions {
             bounds = bounds.union(region.rect)
+        }
+        for note in textNotes {
+            bounds = bounds.union(textBounds(for: note))
         }
         return bounds
     }
@@ -2273,11 +3089,13 @@ private final class AnnotationCanvasView: NSView {
     // MARK: Export
 
     func imageWithAnnotations() -> NSImage? {
+        commitTextEditing()
         guard let image = renderCGImage() else { return nil }
         return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
     }
 
     func pngDataWithAnnotations() -> Data? {
+        commitTextEditing()
         guard let image = renderCGImage() else { return nil }
         return NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
     }
@@ -2303,6 +3121,9 @@ private final class AnnotationCanvasView: NSView {
         }
         for region in blurRegions {
             exportBounds = exportBounds.union(region.rect)
+        }
+        for note in textNotes {
+            exportBounds = exportBounds.union(textBounds(for: note))
         }
 
         let originX = floor(exportBounds.minX)
@@ -2401,6 +3222,27 @@ private final class AnnotationCanvasView: NSView {
             )
             context.addPath(path.cgPath)
             context.strokePath()
+        }
+
+        // Text sits above every shape. The editor works in a flipped (y-down)
+        // space, so flip the export context to reuse the same drawing code.
+        if !textNotes.isEmpty {
+            context.saveGState()
+            context.translateBy(x: 0, y: CGFloat(exportHeight))
+            context.scaleBy(x: 1, y: -1)
+
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+            for note in textNotes {
+                drawTextNote(
+                    note,
+                    transform: { CGPoint(x: $0.x - originX, y: $0.y - originY) },
+                    scale: 1
+                )
+            }
+            NSGraphicsContext.restoreGraphicsState()
+
+            context.restoreGState()
         }
 
         return context.makeImage()

@@ -35,6 +35,20 @@ underneath it is blurred. Blur regions are edited like squares — drag a corner
 to resize, drag the body to move, or press **Delete** to remove one. Blur is
 baked into Copy and Save at full resolution.
 
+The text tool adds labels to the capture. With the text tool active, click
+anywhere to start typing; press **Return** to commit or **Esc** to cancel. Drag
+a label to move it, double-click it to edit the wording, and press **Delete** to
+remove it. Text renders above the arrows, squares, and blur regions.
+
+Labels are drawn in a speech bubble with a draggable tail. Pick the text and
+bubble colours in the options bar — white, yellow, black, blue, or **No
+background** for plain text — and use the two size buttons to make the selected
+label larger or smaller. Drag the round handle at the tail's tip to point it at
+the part of the image the label describes. The base of the tail automatically
+attaches to whichever side of the bubble is nearest the tip (left, right, top,
+or bottom), so a label can point in any direction. Dropping the tip inside the
+bubble hides the tail until you drag it out again.
+
 The canvas has a checkerboard work area around the image, so annotations can
 start or end outside the capture. The image and the annotations together are
 treated as the content: they are fitted at up to 1:1 into the window with a
@@ -52,12 +66,14 @@ As soon as a drawing tool is selected, an options bar appears at the top-right
 and shows only that tool's controls. The arrow tool shows color swatches and
 line thickness buttons. The square tool shows the same color and thickness
 controls plus a rounded-corner toggle and three fill buttons: **full
-transparency** (outline only), **medium transparency**, or **opaque**. The blur
-tool has no styling, so the bar hides while it is active. The fill level never
-changes the square's border, which is always fully opaque. Changes apply to the
-selected annotation (or to the next one if nothing is selected) and are
-remembered between launches. Copy and Save grow the output to include every
-annotation; the added area outside the original capture stays transparent.
+transparency** (outline only), **medium transparency**, or **opaque**. The text
+tool shows text colour swatches, bubble background choices, and the text-size
+buttons. The blur tool has no styling, so the bar hides while it is active. The
+fill level never changes the square's border, which is always fully opaque.
+Changes apply to the selected annotation (or to the next one if nothing is
+selected) and are remembered between launches. Copy and Save grow the output to
+include every annotation; the added area outside the original capture stays
+transparent.
 
 Press **⌘C** to copy the annotated image and close the window, or **⌘S** to save
 a PNG to your chosen folder. Press **Esc** to cancel a drag, then again to
