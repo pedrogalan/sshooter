@@ -20,8 +20,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var hotKey: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
     private var statusMenu: NSMenu?
-    private var saveFolderItem: NSMenuItem?
     private var reopenEditorItem: NSMenuItem?
+    private var settingsWindowController: SettingsWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let button = statusItem.button {
@@ -44,16 +44,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let menu = NSMenu()
         menu.delegate = self
 
-        let captureItem = NSMenuItem(
-            title: "Capture Area  ⌘⇧2",
-            action: #selector(captureArea(_:)),
-            keyEquivalent: ""
-        )
-        captureItem.target = self
-        menu.addItem(captureItem)
-
         let reopenItem = NSMenuItem(
-            title: "Reopen Editor",
+            title: "Reopen editor",
             action: #selector(reopenEditor(_:)),
             keyEquivalent: ""
         )
@@ -64,18 +56,27 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
         menu.addItem(.separator())
 
-        let folderItem = NSMenuItem(
-            title: saveFolderTitle(),
-            action: #selector(chooseSaveFolder(_:)),
-            keyEquivalent: ""
+        let captureItem = NSMenuItem(
+            title: "Capture area",
+            action: #selector(captureArea(_:)),
+            keyEquivalent: "2"
         )
-        folderItem.target = self
-        menu.addItem(folderItem)
-        saveFolderItem = folderItem
+        captureItem.keyEquivalentModifierMask = [.command, .shift]
+        captureItem.target = self
+        menu.addItem(captureItem)
+
         menu.addItem(.separator())
 
+        let settingsItem = NSMenuItem(
+            title: "Settings",
+            action: #selector(showSettings(_:)),
+            keyEquivalent: ""
+        )
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
         let quitItem = NSMenuItem(
-            title: "Quit sshooter",
+            title: "Quit",
             action: #selector(quit(_:)),
             keyEquivalent: "q"
         )
@@ -87,7 +88,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        saveFolderItem?.title = saveFolderTitle()
         reopenEditorItem?.isEnabled = CaptureModel.shared.canReopenEditor
     }
 
@@ -95,16 +95,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         CaptureModel.shared.reopenEditor()
     }
 
-    @objc private func chooseSaveFolder(_ sender: Any?) {
-        ScreenshotStore.shared.chooseSaveFolder()
-        saveFolderItem?.title = saveFolderTitle()
-    }
-
-    private func saveFolderTitle() -> String {
-        guard let folder = ScreenshotStore.shared.saveFolderURL else {
-            return "Choose Save Folder…"
+    @objc private func showSettings(_ sender: Any?) {
+        NSApp.setActivationPolicy(.regular)
+        if settingsWindowController == nil {
+            settingsWindowController = SettingsWindowController { [weak self] in
+                CaptureModel.shared.settingsDidClose()
+                self?.settingsWindowController = nil
+            }
         }
-        return "Save Folder: \(folder.lastPathComponent)"
+        settingsWindowController?.show()
     }
 
     // MARK: - Main menu
@@ -121,13 +120,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         appMenu.addItem(withTitle: "About sshooter", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
 
-        let folderItem = NSMenuItem(
-            title: "Choose Save Folder…",
-            action: #selector(chooseSaveFolder(_:)),
+        let settingsItem = NSMenuItem(
+            title: "Settings…",
+            action: #selector(showSettings(_:)),
             keyEquivalent: ""
         )
-        folderItem.target = self
-        appMenu.addItem(folderItem)
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
         appMenu.addItem(.separator())
 
         appMenu.addItem(withTitle: "Hide sshooter", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")

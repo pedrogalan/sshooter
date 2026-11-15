@@ -174,6 +174,14 @@ final class CaptureModel {
     }
 
     private func showEditor(with image: CGImage) {
+        if ScreenshotStore.shared.autoSaveCaptures {
+            do {
+                _ = try ScreenshotStore.shared.saveCapture(image)
+            } catch {
+                showAutoSaveError(error)
+            }
+        }
+
         // The app is a menu-bar agent while idle, but the editor behaves like a
         // regular app: it gets its own menu bar and a Dock presence.
         NSApp.setActivationPolicy(.regular)
@@ -205,6 +213,12 @@ final class CaptureModel {
         editorWindow?.close()
     }
 
+    func settingsDidClose() {
+        if editorWindow?.isVisible != true {
+            NSApp.setActivationPolicy(.accessory)
+        }
+    }
+
     var canReopenEditor: Bool {
         editorWindow?.hasContent ?? false
     }
@@ -231,6 +245,15 @@ final class CaptureModel {
         let alert = NSAlert()
         alert.messageText = "Couldn’t capture the screen"
         alert.informativeText = error.localizedDescription + "\n\nCheck System Settings → Privacy & Security → Screen & System Audio Recording, then try again."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func showAutoSaveError(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn’t save the automatic screenshot"
+        alert.informativeText = error.localizedDescription
         alert.alertStyle = .warning
         alert.addButton(withTitle: "OK")
         alert.runModal()

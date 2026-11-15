@@ -6,6 +6,7 @@ final class ScreenshotStore {
 
     private enum DefaultsKey {
         static let saveFolderPath = "saveFolderPath"
+        static let autoSaveCaptures = "autoSaveCaptures"
     }
 
     private let defaults: UserDefaults
@@ -24,6 +25,11 @@ final class ScreenshotStore {
             return nil
         }
         return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    var autoSaveCaptures: Bool {
+        get { defaults.bool(forKey: DefaultsKey.autoSaveCaptures) }
+        set { defaults.set(newValue, forKey: DefaultsKey.autoSaveCaptures) }
     }
 
     @discardableResult
@@ -62,6 +68,15 @@ final class ScreenshotStore {
             throw ScreenshotStoreError.writeFailed(url: url, underlying: error)
         }
         return url
+    }
+
+    @discardableResult
+    func saveCapture(_ image: CGImage) throws -> URL? {
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        guard let data = bitmap.representation(using: .png, properties: [:]) else {
+            throw ScreenshotStoreError.encodingFailed
+        }
+        return try save(pngData: data)
     }
 
     private func uniqueFileURL(in folder: URL) -> URL {

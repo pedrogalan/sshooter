@@ -82,8 +82,10 @@ Press **⌘C** to copy the annotated image and close the window, or **⌘S** to 
 a PNG to your chosen folder. Press **Esc** to cancel a drag, then again to
 deselect an annotation, then again to close the editor.
 
-Choose **Save Folder** from the menu bar menu to change the destination. If no
-folder is configured, saving asks for one the first time.
+Open **Settings** from the menu bar menu to choose the screenshot folder and
+optionally save each capture automatically. Automatic saves contain the
+original capture without annotations; use **⌘S** in the editor to save arrows,
+text, and other annotations with the image.
 
 While the annotation window is open, sshooter temporarily behaves like a regular
 app: it shows its own menu bar (File, Edit, Window) and a Dock icon. Closing the
