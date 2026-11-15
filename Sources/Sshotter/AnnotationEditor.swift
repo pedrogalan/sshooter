@@ -750,6 +750,11 @@ private final class FillLevelButton: HoverButton {
 
 @MainActor
 private final class ArrowOptionsPanel: NSView {
+    enum Mode {
+        case arrow
+        case square
+    }
+
     private static let swatchSize: CGFloat = 22
     private static let swatchSpacing: CGFloat = 6
     private static let thicknessSize: CGFloat = 28
@@ -764,8 +769,11 @@ private final class ArrowOptionsPanel: NSView {
     var onRoundedChanged: (@MainActor (Bool) -> Void)?
     var onFillChanged: (@MainActor (SquareFill) -> Void)?
 
+    private(set) var mode: Mode = .arrow
     private var swatchButtons: [ColorSwatchButton] = []
     private var thicknessButtons: [ThicknessButton] = []
+    private let colorDivider = NSBox()
+    private let squareDivider = NSBox()
     private let roundedButton = RoundedCornerButton()
     private var fillButtons: [FillLevelButton] = []
     private var isRounded = SquarePreferences.isRounded
@@ -774,7 +782,7 @@ private final class ArrowOptionsPanel: NSView {
     override var isFlipped: Bool { false }
 
     convenience init() {
-        self.init(frame: NSRect(origin: .zero, size: Self.preferredSize))
+        self.init(frame: NSRect(origin: .zero, size: NSSize(width: 0, height: Self.panelHeight)))
     }
 
     override init(frame frameRect: NSRect) {
@@ -786,111 +794,118 @@ private final class ArrowOptionsPanel: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    static var preferredSize: NSSize {
-        let swatches = CGFloat(ArrowColor.allCases.count) * swatchSize
-            + CGFloat(ArrowColor.allCases.count - 1) * swatchSpacing
-        let thicknesses = CGFloat(ArrowLineWidth.allCases.count) * thicknessSize
-            + CGFloat(ArrowLineWidth.allCases.count - 1) * thicknessSpacing
-        let fills = CGFloat(SquareFill.allCases.count) * thicknessSize
-            + CGFloat(SquareFill.allCases.count - 1) * thicknessSpacing
-        let width = horizontalPadding * 2
-            + swatches
-            + dividerGap * 2 + 1
-            + thicknesses
-            + dividerGap * 2 + 1
-            + thicknessSize + roundedGap
-            + fills
-        return NSSize(width: width, height: panelHeight)
+    func setMode(_ mode: Mode) {
+        guard self.mode != mode else { return }
+        self.mode = mode
+        layoutControls()
+        needsDisplay = true
     }
 
     private func buildSubviews() {
-        var x = Self.horizontalPadding
-
         for color in ArrowColor.allCases {
             let button = ColorSwatchButton(color: color)
             button.tag = color.rawValue
             button.target = self
             button.action = #selector(selectColor(_:))
-            button.frame = NSRect(
-                x: x,
-                y: (Self.panelHeight - Self.swatchSize) / 2,
-                width: Self.swatchSize,
-                height: Self.swatchSize
-            )
             addSubview(button)
             swatchButtons.append(button)
-            x += Self.swatchSize + Self.swatchSpacing
         }
 
-        x += Self.dividerGap - Self.swatchSpacing
-
-        let divider = NSBox(frame: NSRect(
-            x: x,
-            y: 10,
-            width: 1,
-            height: Self.panelHeight - 20
-        ))
-        divider.boxType = .separator
-        addSubview(divider)
-
-        x += 1 + Self.dividerGap
+        colorDivider.boxType = .separator
+        addSubview(colorDivider)
 
         for thickness in ArrowLineWidth.allCases {
             let button = ThicknessButton(thickness: thickness)
             button.tag = thickness.rawValue
             button.target = self
             button.action = #selector(selectThickness(_:))
-            button.frame = NSRect(
-                x: x,
-                y: (Self.panelHeight - Self.thicknessSize) / 2,
-                width: Self.thicknessSize,
-                height: Self.thicknessSize
-            )
             addSubview(button)
             thicknessButtons.append(button)
-            x += Self.thicknessSize + Self.thicknessSpacing
         }
 
-        x += Self.dividerGap - Self.thicknessSpacing
-
-        let squareDivider = NSBox(frame: NSRect(
-            x: x,
-            y: 10,
-            width: 1,
-            height: Self.panelHeight - 20
-        ))
         squareDivider.boxType = .separator
         addSubview(squareDivider)
 
-        x += 1 + Self.dividerGap
-
         roundedButton.target = self
         roundedButton.action = #selector(toggleRounded(_:))
-        roundedButton.frame = NSRect(
-            x: x,
-            y: (Self.panelHeight - Self.thicknessSize) / 2,
-            width: Self.thicknessSize,
-            height: Self.thicknessSize
-        )
         addSubview(roundedButton)
-        x += Self.thicknessSize + Self.roundedGap
 
         for fill in SquareFill.allCases {
             let button = FillLevelButton(fill: fill)
             button.target = self
             button.action = #selector(selectFill(_:))
+            addSubview(button)
+            fillButtons.append(button)
+        }
+
+        updateSquareSelection(isRounded: isRounded, fill: fill)
+        layoutControls()
+    }
+
+    /// Lays out the controls for the current mode and resizes the panel to fit.
+    /// Arrow mode stops after the thickness buttons; square mode also shows the
+    /// rounded-corner toggle and the fill levels.
+    private func layoutControls() {
+        let showsSquareControls = mode == .square
+        squareDivider.isHidden = !showsSquareControls
+        roundedButton.isHidden = !showsSquareControls
+        for button in fillButtons {
+            button.isHidden = !showsSquareControls
+        }
+
+        var x = Self.horizontalPadding
+
+        for button in swatchButtons {
+            button.frame = NSRect(
+                x: x,
+                y: (Self.panelHeight - Self.swatchSize) / 2,
+                width: Self.swatchSize,
+                height: Self.swatchSize
+            )
+            x += Self.swatchSize + Self.swatchSpacing
+        }
+
+        x += Self.dividerGap - Self.swatchSpacing
+        colorDivider.frame = NSRect(x: x, y: 10, width: 1, height: Self.panelHeight - 20)
+        x += 1 + Self.dividerGap
+
+        for button in thicknessButtons {
             button.frame = NSRect(
                 x: x,
                 y: (Self.panelHeight - Self.thicknessSize) / 2,
                 width: Self.thicknessSize,
                 height: Self.thicknessSize
             )
-            addSubview(button)
-            fillButtons.append(button)
             x += Self.thicknessSize + Self.thicknessSpacing
         }
 
-        updateSquareSelection(isRounded: isRounded, fill: fill)
+        if showsSquareControls {
+            x += Self.dividerGap - Self.thicknessSpacing
+            squareDivider.frame = NSRect(x: x, y: 10, width: 1, height: Self.panelHeight - 20)
+            x += 1 + Self.dividerGap
+
+            roundedButton.frame = NSRect(
+                x: x,
+                y: (Self.panelHeight - Self.thicknessSize) / 2,
+                width: Self.thicknessSize,
+                height: Self.thicknessSize
+            )
+            x += Self.thicknessSize + Self.roundedGap
+
+            for button in fillButtons {
+                button.frame = NSRect(
+                    x: x,
+                    y: (Self.panelHeight - Self.thicknessSize) / 2,
+                    width: Self.thicknessSize,
+                    height: Self.thicknessSize
+                )
+                x += Self.thicknessSize + Self.thicknessSpacing
+            }
+        }
+
+        // `x` ends one spacing past the last control; trim it before padding.
+        let width = x - Self.thicknessSpacing + Self.horizontalPadding
+        frame = NSRect(origin: frame.origin, size: NSSize(width: width, height: Self.panelHeight))
     }
 
     func updateSelection(color: ArrowColor, thickness: ArrowLineWidth) {
@@ -1538,6 +1553,7 @@ private final class AnnotationCanvasView: NSView {
             selection = nil
             optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
             optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+            updateOptionsVisibility()
             switch activeTool {
             case .some(.arrow):
                 dragMode = .drawingArrow(start: contentPoint)
@@ -1775,6 +1791,7 @@ private final class AnnotationCanvasView: NSView {
         currentColor = arrow.color
         currentThickness = arrow.thickness
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        updateOptionsVisibility()
     }
 
     private func selectSquare(at index: Int) {
@@ -1787,11 +1804,13 @@ private final class AnnotationCanvasView: NSView {
         currentFill = square.fill
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        updateOptionsVisibility()
     }
 
     private func selectBlur(at index: Int) {
         guard blurRegions.indices.contains(index) else { return }
         selection = .blur(index)
+        updateOptionsVisibility()
     }
 
     private func applyColor(_ color: ArrowColor) {
@@ -1838,22 +1857,47 @@ private final class AnnotationCanvasView: NSView {
         window?.makeFirstResponder(self)
     }
 
+    /// The options bar matches the active tool. When no tool is active it
+    /// follows the selected annotation instead. Blur has no options, so it
+    /// hides the bar.
+    private var optionsMode: ArrowOptionsPanel.Mode? {
+        guard screenshot != nil else { return nil }
+        switch activeTool {
+        case .some(.arrow):
+            return .arrow
+        case .some(.square):
+            return .square
+        case .some(.blur):
+            return nil
+        case .none:
+            switch selection {
+            case .some(.arrow):
+                return .arrow
+            case .some(.square):
+                return .square
+            default:
+                return nil
+            }
+        }
+    }
+
     private func updateOptionsVisibility(animated: Bool = true) {
-        let shouldShow = !arrows.isEmpty || !squares.isEmpty || !blurRegions.isEmpty
-        if shouldShow {
-            guard optionsPanel.isHidden else { return }
-            optionsPanel.isHidden = false
-            if animated {
-                optionsPanel.alphaValue = 0
-                NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.15
-                    optionsPanel.animator().alphaValue = 1
-                }
-            } else {
-                optionsPanel.alphaValue = 1
+        guard let mode = optionsMode else {
+            optionsPanel.isHidden = true
+            optionsPanel.alphaValue = 1
+            return
+        }
+        optionsPanel.setMode(mode)
+        needsLayout = true
+        guard optionsPanel.isHidden else { return }
+        optionsPanel.isHidden = false
+        if animated {
+            optionsPanel.alphaValue = 0
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.15
+                optionsPanel.animator().alphaValue = 1
             }
         } else {
-            optionsPanel.isHidden = true
             optionsPanel.alphaValue = 1
         }
     }
@@ -1874,6 +1918,7 @@ private final class AnnotationCanvasView: NSView {
             selection = nil
             optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
             optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+            updateOptionsVisibility()
             needsDisplay = true
             return true
         }

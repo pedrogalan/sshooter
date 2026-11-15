@@ -48,14 +48,15 @@ zooms around the pointer. Two-finger scroll pans when you need to reach another
 part of the canvas. Press **⌘0** (or two-finger double-tap) to fit all content,
 including annotations that extend into the grey area, with a border again.
 
-After the first annotation, an options panel appears at the top-right with color
-swatches, line thickness buttons, and square options. Color and thickness apply
-to both arrows and squares. For squares, the rounded-corner button toggles
-between sharp and rounded corners, and the three fill buttons choose **full
-transparency** (outline only), **medium transparency**, or **opaque**. The fill
-level never changes the square's border, which is always fully opaque. Changes
-apply to the selected annotation (or to the next one if nothing is selected) and
-are remembered between launches. Copy and Save grow the output to include every
+As soon as a drawing tool is selected, an options bar appears at the top-right
+and shows only that tool's controls. The arrow tool shows color swatches and
+line thickness buttons. The square tool shows the same color and thickness
+controls plus a rounded-corner toggle and three fill buttons: **full
+transparency** (outline only), **medium transparency**, or **opaque**. The blur
+tool has no styling, so the bar hides while it is active. The fill level never
+changes the square's border, which is always fully opaque. Changes apply to the
+selected annotation (or to the next one if nothing is selected) and are
+remembered between launches. Copy and Save grow the output to include every
 annotation; the added area outside the original capture stays transparent.
 
 Press **⌘C** to copy the annotated image and close the window, or **⌘S** to save
