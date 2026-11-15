@@ -20,11 +20,14 @@ After closing the editor, choose **Reopen Editor** from the camera menu to bring
 back the last capture with its annotations, selection, and zoom exactly as you
 left it. A new capture replaces the stored one.
 
+The Pointer tool is selected by default. It keeps the arrow cursor active and
+clicks on the image do nothing. Choose an annotation tool to draw.
+
 Draw an arrow by dragging on the canvas. The arrow tool stays highlighted while
-it is active; click it again to stop drawing and just select arrows. The new
-arrow stays selected: drag either endpoint to change its length or direction,
-or drag the line itself to move the whole arrow. Press **Delete** to remove the
-selected arrow.
+it is active; click it again to return to the Pointer tool. The new arrow stays
+selected: drag either endpoint to change its length or direction, or drag the
+line itself to move the whole arrow. Press **Delete** to remove the selected
+arrow.
 
 The square tool works the same way: drag on the canvas to mark an area. Squares
 stay selected after drawing; drag a corner to resize, or drag the body to move
@@ -36,10 +39,11 @@ to resize, drag the body to move, or press **Delete** to remove one. Blur is
 baked into Copy and Save at full resolution.
 
 The text tool adds labels to the capture. With the text tool active the pointer
-becomes an I-beam: click anywhere to start typing, then press **Return** to
-commit or **Esc** to cancel. Drag a label to move it, double-click it to edit
-the wording, and press **Delete** to remove it. Text renders above the arrows,
-squares, and blur regions.
+becomes an I-beam: click anywhere to start typing. **Return** adds a newline so
+labels can span several lines; click outside the label or press **Esc** to
+commit it. Drag a label to move it, double-click it to edit the wording, and
+press **Delete** to remove it. Text renders above the arrows, squares, and blur
+regions. The pointer stays a normal arrow over the toolbar and the options bar.
 
 Pick the text colour in the options bar, choose a background (white, yellow,
 black, blue, or **No background** for plain text), and use the two size buttons

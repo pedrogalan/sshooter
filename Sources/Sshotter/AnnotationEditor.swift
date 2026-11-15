@@ -205,6 +205,8 @@ enum TextBackground: Int, CaseIterable {
 }
 
 enum TextPreferences {
+    static let minimumScale: CGFloat = 0.75
+    static let maximumScale: CGFloat = 16
     private static let colorKey = "textColor"
     private static let backgroundKey = "textBackground"
     private static let scaleKey = "textScale"
@@ -243,10 +245,11 @@ enum TextPreferences {
             let defaults = UserDefaults.standard
             guard defaults.object(forKey: scaleKey) != nil else { return 1 }
             let value = defaults.double(forKey: scaleKey)
-            return min(max(value, 0.35), 4)
+            return min(max(value, Double(minimumScale)), Double(maximumScale))
         }
         set {
-            UserDefaults.standard.set(Double(newValue), forKey: scaleKey)
+            let clampedValue = min(max(newValue, minimumScale), maximumScale)
+            UserDefaults.standard.set(Double(clampedValue), forKey: scaleKey)
         }
     }
 }
@@ -314,6 +317,10 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         symbolName: "square.and.arrow.down",
         toolTip: "Save a PNG to your chosen folder (⌘S)"
     )
+    private let pointerButton = ToolStripButton(
+        symbolName: "cursorarrow",
+        toolTip: "Pointer tool: clicking the image does nothing."
+    )
     private let arrowButton = ToolStripButton(
         symbolName: "arrow.up.right",
         toolTip: "Arrow tool: drag on the canvas to draw. Click again to stop drawing."
@@ -356,8 +363,9 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         configureToolStrip()
         configureCanvas()
 
-        canvas.setTool(.arrow)
-        arrowButton.setActive(true)
+        canvas.setTool(nil)
+        pointerButton.setActive(true)
+        arrowButton.setActive(false)
         squareButton.setActive(false)
         blurButton.setActive(false)
         textButton.setActive(false)
@@ -378,22 +386,27 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         saveButton.action = #selector(saveScreenshot(_:))
         toolStrip.addSubview(saveButton)
 
-        arrowButton.frame = NSRect(x: 106, y: 8, width: 40, height: 32)
+        pointerButton.frame = NSRect(x: 106, y: 8, width: 40, height: 32)
+        pointerButton.target = self
+        pointerButton.action = #selector(selectPointerTool(_:))
+        toolStrip.addSubview(pointerButton)
+
+        arrowButton.frame = NSRect(x: 150, y: 8, width: 40, height: 32)
         arrowButton.target = self
         arrowButton.action = #selector(toggleArrowTool(_:))
         toolStrip.addSubview(arrowButton)
 
-        squareButton.frame = NSRect(x: 150, y: 8, width: 40, height: 32)
+        squareButton.frame = NSRect(x: 194, y: 8, width: 40, height: 32)
         squareButton.target = self
         squareButton.action = #selector(toggleSquareTool(_:))
         toolStrip.addSubview(squareButton)
 
-        blurButton.frame = NSRect(x: 194, y: 8, width: 40, height: 32)
+        blurButton.frame = NSRect(x: 238, y: 8, width: 40, height: 32)
         blurButton.target = self
         blurButton.action = #selector(toggleBlurTool(_:))
         toolStrip.addSubview(blurButton)
 
-        textButton.frame = NSRect(x: 238, y: 8, width: 40, height: 32)
+        textButton.frame = NSRect(x: 282, y: 8, width: 40, height: 32)
         textButton.target = self
         textButton.action = #selector(toggleTextTool(_:))
         toolStrip.addSubview(textButton)
@@ -430,7 +443,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
             hasPositionedWindow = true
         }
 
-        selectTool(.arrow)
+        selectPointerTool(nil)
         NSApp.activate()
         makeKeyAndOrderFront(nil)
         makeFirstResponder(canvas)
@@ -465,9 +478,20 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         toggleTool(.text)
     }
 
+    @objc private func selectPointerTool(_ sender: Any?) {
+        canvas.setTool(nil)
+        pointerButton.setActive(true)
+        arrowButton.setActive(false)
+        squareButton.setActive(false)
+        blurButton.setActive(false)
+        textButton.setActive(false)
+        makeFirstResponder(canvas)
+    }
+
     private func toggleTool(_ tool: AnnotationTool) {
         if canvas.activeTool == tool {
             canvas.setTool(nil)
+            pointerButton.setActive(true)
             arrowButton.setActive(false)
             squareButton.setActive(false)
             blurButton.setActive(false)
@@ -480,6 +504,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
 
     private func selectTool(_ tool: AnnotationTool) {
         canvas.setTool(tool)
+        pointerButton.setActive(false)
         arrowButton.setActive(tool == .arrow)
         squareButton.setActive(tool == .square)
         blurButton.setActive(tool == .blur)
@@ -511,7 +536,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.keyCode == 53 {
             if canvas.isEditingText {
-                canvas.cancelActiveTextEditing()
+                canvas.commitActiveTextEditing()
                 return true
             }
             if canvas.handleEscape() { return true }
@@ -574,6 +599,11 @@ private final class EditorToolStrip: NSView {
         NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
         NSRect(x: Self.dividerX, y: 12, width: 1, height: bounds.height - 24).fill()
     }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .arrow)
+    }
 }
 
 // MARK: - Buttons
@@ -617,6 +647,11 @@ private class HoverButton: NSButton {
 
     override func mouseExited(with event: NSEvent) {
         isHovered = false
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .arrow)
     }
 }
 
@@ -996,6 +1031,11 @@ private final class ArrowOptionsPanel: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .arrow)
+    }
+
     func setMode(_ mode: Mode) {
         guard self.mode != mode else { return }
         self.mode = mode
@@ -1305,9 +1345,9 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         var rect: CGRect
     }
 
-    /// A single-line text annotation. `origin` is the top-left of the text in
-    /// image units; the optional background rectangle is derived from the text
-    /// metrics at draw time.
+    /// A text annotation. `origin` is the top-left of the text in image units;
+    /// the optional background rectangle is derived from the text metrics at
+    /// draw time.
     private struct TextNote {
         var origin: CGPoint
         var text: String
@@ -1377,8 +1417,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var currentTextScale = TextPreferences.scale
     private var textEditor: NSTextField?
     private var editingTextIndex: Int?
-    private var editingOriginalText = ""
-    private var editingIsNew = false
+    private var ignoreNextMouseDownAfterTextCommit = false
     private var isPreparingTextEditor = false
     private var trackingArea: NSTrackingArea?
     private let optionsPanel = ArrowOptionsPanel()
@@ -1850,13 +1889,13 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     /// background and as the click target for moving a note.
     private func textBackgroundRect(for note: TextNote) -> CGRect {
         let font = textFont(for: note)
-        let textSize = (note.text as NSString).size(withAttributes: [.font: font])
+        let metrics = textSize(for: note.text, font: font)
         let padding = note.fontSize * 0.45
         return CGRect(
             x: note.origin.x - padding,
             y: note.origin.y - padding,
-            width: max(textSize.width, note.fontSize * 0.5) + padding * 2,
-            height: textSize.height + padding * 2
+            width: max(metrics.width, note.fontSize * 0.5) + padding * 2,
+            height: metrics.height + padding * 2
         )
     }
 
@@ -1884,7 +1923,28 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             .font: font,
             .foregroundColor: note.color.nsColor
         ]
-        (note.text as NSString).draw(at: transform(note.origin), withAttributes: attributes)
+        let size = textSize(for: note.text, font: font)
+        let origin = transform(note.origin)
+        NSAttributedString(string: note.text, attributes: attributes).draw(
+            in: CGRect(origin: origin, size: size)
+        )
+    }
+
+    /// Measures explicit newlines as separate lines while preserving the
+    /// font's line height for empty lines.
+    private func textSize(for text: String, font: NSFont) -> CGSize {
+        let lines = text.components(separatedBy: .newlines)
+        let lineWidths = lines.map {
+            ($0 as NSString).size(withAttributes: [.font: font]).width
+        }
+        let lineHeight = max(
+            font.pointSize,
+            font.ascender - font.descender + font.leading
+        )
+        return CGSize(
+            width: ceil(lineWidths.max() ?? 0),
+            height: ceil(lineHeight * CGFloat(max(lines.count, 1)))
+        )
     }
 
     private func transformedRect(
@@ -1927,8 +1987,6 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         endTextEditing(makeCanvasFirstResponder: false)
 
         editingTextIndex = index
-        editingOriginalText = textNotes[index].text
-        editingIsNew = textNotes[index].text.isEmpty
 
         let field = NSTextField(frame: .zero)
         field.delegate = self
@@ -1936,9 +1994,13 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         field.isBezeled = false
         field.drawsBackground = true
         field.focusRingType = .exterior
-        field.usesSingleLineMode = true
-        field.cell?.wraps = false
-        field.cell?.isScrollable = true
+        // Return inserts a newline instead of committing, so a label can span
+        // several lines. Clicking outside the field commits the text.
+        field.usesSingleLineMode = false
+        field.maximumNumberOfLines = 0
+        field.cell?.wraps = true
+        field.cell?.isScrollable = false
+        field.cell?.truncatesLastVisibleLine = false
         field.stringValue = textNotes[index].text
         field.textColor = textNotes[index].color.nsColor
         field.backgroundColor = textNotes[index].background.nsColor
@@ -1967,13 +2029,21 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         let note = textNotes[index]
         let font = textFont(for: note, scale: cameraScale)
         field.font = font
-        let measured = (field.stringValue as NSString).size(withAttributes: [.font: font])
-        let height = ceil(font.ascender - font.descender + 6)
+        let measured = textSize(for: field.stringValue, font: font)
+        let lineHeight = ceil(font.ascender - font.descender + font.leading + 8)
+        let fieldWidth = max(measured.width + 22, 90)
+        let textLayout = NSAttributedString(
+            string: field.stringValue,
+            attributes: [.font: font]
+        ).boundingRect(
+            with: NSSize(width: max(fieldWidth - 22, 1), height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
         field.frame = NSRect(
             x: contentToView(note.origin).x,
             y: contentToView(note.origin).y,
-            width: max(measured.width + 22, 90),
-            height: height
+            width: fieldWidth,
+            height: max(ceil(textLayout.height) + 8, lineHeight)
         )
     }
 
@@ -1995,29 +2065,14 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         endTextEditing()
     }
 
-    private func cancelTextEditing() {
-        guard let index = editingTextIndex else { return }
-        if textNotes.indices.contains(index) {
-            if editingIsNew {
-                textNotes.remove(at: index)
-                selection = nil
-            } else {
-                textNotes[index].text = editingOriginalText
-            }
-        }
-        endTextEditing()
-    }
-
     var isEditingText: Bool { editingTextIndex != nil }
 
-    func cancelActiveTextEditing() {
-        cancelTextEditing()
+    func commitActiveTextEditing() {
+        commitTextEditing()
     }
 
     private func endTextEditing(makeCanvasFirstResponder: Bool = true) {
         editingTextIndex = nil
-        editingOriginalText = ""
-        editingIsNew = false
         textEditor?.removeFromSuperview()
         textEditor = nil
         if makeCanvasFirstResponder {
@@ -2031,6 +2086,12 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         guard !isPreparingTextEditor,
               let field = textEditor,
               (notification.object as? NSTextField) === field else { return }
+        // AppKit can end field editing before forwarding the same outside
+        // click to this canvas. Treat that click as the commit action only;
+        // it must not also create another text note.
+        if NSApp.currentEvent?.type == .leftMouseDown {
+            ignoreNextMouseDownAfterTextCommit = true
+        }
         commitTextEditing()
     }
 
@@ -2048,11 +2109,13 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         doCommandBy commandSelector: Selector
     ) -> Bool {
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-            cancelTextEditing()
+            commitTextEditing()
             return true
         }
+        // NSTextField ends editing on Return by default. Insert a newline
+        // instead so labels can span several lines; clicking outside commits.
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-            commitTextEditing()
+            textView.insertNewlineIgnoringFieldEditor(self)
             return true
         }
         return false
@@ -2061,9 +2124,15 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     // MARK: Mouse handling
 
     override func mouseDown(with event: NSEvent) {
+        if ignoreNextMouseDownAfterTextCommit {
+            ignoreNextMouseDownAfterTextCommit = false
+            return
+        }
         if editingTextIndex != nil {
             commitTextEditing()
+            return
         }
+        guard activeTool != nil else { return }
         ensureCamera()
         let pointInView = convert(event.locationInWindow, from: nil)
         guard screenshot != nil, let contentPoint = clampedContentPoint(for: pointInView) else {
@@ -2373,6 +2442,14 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         updateCursor(at: convert(event.locationInWindow, from: nil))
     }
 
+    override func mouseEntered(with event: NSEvent) {
+        updateCursor(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        NSCursor.arrow.set()
+    }
+
     override func cursorUpdate(with event: NSEvent) {
         updateCursor(at: convert(event.locationInWindow, from: nil))
     }
@@ -2384,7 +2461,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.activeInKeyWindow, .mouseMoved, .cursorUpdate, .inVisibleRect],
+            options: [.activeInKeyWindow, .mouseEnteredAndExited, .mouseMoved, .cursorUpdate, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -2398,8 +2475,12 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         updateCursor(at: .zero)
     }
 
-    private func updateCursor(at _: CGPoint) {
-        if activeTool == .text {
+    private func updateCursor(at point: CGPoint) {
+        // The options panel floats inside the canvas and is full of regular
+        // controls, so keep the standard arrow there even with the text tool.
+        let overOptions = !optionsPanel.isHidden && optionsPanel.frame.contains(point)
+        let overImage = imageRect.contains(point)
+        if activeTool == .text, overImage, !overOptions {
             NSCursor.iBeam.set()
         } else {
             NSCursor.arrow.set()
@@ -2408,7 +2489,11 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     override func resetCursorRects() {
         super.resetCursorRects()
-        addCursorRect(bounds, cursor: activeTool == .text ? .iBeam : .arrow)
+        if activeTool == .text, screenshot != nil {
+            addCursorRect(imageRect, cursor: .iBeam)
+        } else {
+            addCursorRect(bounds, cursor: .arrow)
+        }
     }
 
     // MARK: Selection and style
@@ -2525,8 +2610,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     private func adjustTextSize(increase: Bool) {
         currentTextScale = min(
-            max(currentTextScale * (increase ? 1.15 : 1 / 1.15), 0.35),
-            4
+            max(currentTextScale * (increase ? 1.15 : 1 / 1.15), TextPreferences.minimumScale),
+            TextPreferences.maximumScale
         )
         TextPreferences.scale = currentTextScale
         if case .text(let index)? = selection, textNotes.indices.contains(index) {
@@ -2637,7 +2722,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 {
             if editingTextIndex != nil {
-                cancelTextEditing()
+                commitTextEditing()
                 return
             }
             if !handleEscape() {
