@@ -916,10 +916,14 @@ private final class ThicknessButton: HoverButton {
     }
 }
 
-/// A plain horizontal stroke preview matching the thickness-button glyphs.
-/// The narrow and wide versions flank the highlight slider as its labels.
+/// A short diagonal stroke preview matching the thickness-button glyphs but
+/// tilted, so the line weight reads more clearly at a glance. The narrow and
+/// wide versions flank the highlight slider as its labels.
 @MainActor
 private final class StrokeWidthGlyph: NSView {
+    /// Tilt away from horizontal, in degrees. A slash reads better than a flat
+    /// line for showing how thick a stroke is.
+    private static let angleDegrees: CGFloat = 35
     private let previewWidth: CGFloat
 
     init(previewWidth: CGFloat) {
@@ -932,9 +936,14 @@ private final class StrokeWidthGlyph: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let angle = Self.angleDegrees * .pi / 180
+        let halfLength: CGFloat = 8
+        let dx = halfLength * cos(angle)
+        let dy = halfLength * sin(angle)
+
         let path = NSBezierPath()
-        path.move(to: NSPoint(x: bounds.midX - 8, y: bounds.midY))
-        path.line(to: NSPoint(x: bounds.midX + 8, y: bounds.midY))
+        path.move(to: NSPoint(x: bounds.midX - dx, y: bounds.midY - dy))
+        path.line(to: NSPoint(x: bounds.midX + dx, y: bounds.midY + dy))
         path.lineWidth = previewWidth
         path.lineCapStyle = .round
         NSColor.labelColor.setStroke()
@@ -1158,7 +1167,7 @@ private final class ArrowOptionsPanel: NSView {
     private static let thicknessSize: CGFloat = 28
     private static let thicknessSpacing: CGFloat = 2
     private static let highlightSliderWidth: CGFloat = 118
-    private static let highlightGlyphSize: CGFloat = 20
+    private static let highlightGlyphSize: CGFloat = 22
     private static let horizontalPadding: CGFloat = 10
     private static let dividerGap: CGFloat = 12
     private static let roundedGap: CGFloat = 6
