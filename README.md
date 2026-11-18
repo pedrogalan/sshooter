@@ -1,4 +1,4 @@
-# sshooter
+# sShooter
 
 A small native macOS menu bar screenshot utility.
 
@@ -8,7 +8,7 @@ Build a standalone app bundle and launch it through macOS Launch Services:
 
 ```sh
 ./Scripts/build-app.sh
-open dist/sshooter.app
+open dist/sShooter.app
 ```
 
 The app appears in the menu bar. Choose **Capture Area** or press **⌘⇧2**,
@@ -87,14 +87,14 @@ optionally save each capture automatically. Automatic saves contain the
 original capture without annotations; use **⌘S** in the editor to save arrows,
 text, and other annotations with the image.
 
-While the annotation window is open, sshooter temporarily behaves like a regular
+While the annotation window is open, sShooter temporarily behaves like a regular
 app: it shows its own menu bar (File, Edit, Window) and a Dock icon. Closing the
 editor returns it to a menu-bar-only app.
 
-**⌘Q** (or **⌘W**) closes the editor but keeps sshooter running. To quit the
-app completely, choose **Quit sshooter** from the camera menu in the menu bar
-(or from the **sshooter** app menu while the editor is open).
+**⌘Q** (or **⌘W**) closes the editor but keeps sShooter running. To quit the
+app completely, choose **Quit sShooter** from the camera menu in the menu bar
+(or from the **sShooter** app menu while the editor is open).
 
 The first capture asks macOS for Screen Recording permission. Grant it to
-**sshooter** in System Settings → Privacy & Security → Screen & System Audio
-Recording, then quit and reopen sshooter if macOS asks you to.
+**sShooter** in System Settings → Privacy & Security → Screen & System Audio
+Recording, then quit and reopen sShooter if macOS asks you to.

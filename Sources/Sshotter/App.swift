@@ -31,13 +31,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 image.size = NSSize(width: 18, height: 18)
                 button.image = image
             } else {
-                button.image = NSImage(systemSymbolName: "camera", accessibilityDescription: "sshooter")
+                button.image = NSImage(systemSymbolName: "camera", accessibilityDescription: "sShooter")
             }
         }
 
         buildStatusMenu()
         buildMainMenu()
-        configureApplicationIcon()
         registerHotKey()
     }
 
@@ -124,7 +123,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let appMenu = NSMenu()
         appMenuItem.submenu = appMenu
 
-        appMenu.addItem(withTitle: "About sshooter", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "About sShooter", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
 
         let settingsItem = NSMenuItem(
@@ -136,7 +135,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         appMenu.addItem(settingsItem)
         appMenu.addItem(.separator())
 
-        appMenu.addItem(withTitle: "Hide sshooter", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Hide sShooter", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthersItem = NSMenuItem(title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
         hideOthersItem.keyEquivalentModifierMask = [.command, .option]
         appMenu.addItem(hideOthersItem)
@@ -152,7 +151,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         appMenu.addItem(closeEditorItem)
         appMenu.addItem(.separator())
         appMenu.addItem(
-            withTitle: "Quit sshooter",
+            withTitle: "Quit sShooter",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: ""
         )
@@ -218,43 +217,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         NSApp.mainMenu = mainMenu
     }
 
-    // MARK: - Application icon
-
-    /// Sets the app icon shown in the Dock while the app runs as a regular app.
-    private func configureApplicationIcon() {
-        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
-           let appIcon = NSImage(contentsOf: url) {
-            NSApp.applicationIconImage = appIcon
-            return
-        }
-
-        let size = NSSize(width: 512, height: 512)
-        let image = NSImage(size: size, flipped: false) { rect in
-            let background = NSBezierPath(
-                roundedRect: rect.insetBy(dx: 40, dy: 40),
-                xRadius: 104,
-                yRadius: 104
-            )
-            NSColor.controlAccentColor.setFill()
-            background.fill()
-
-            let configuration = NSImage.SymbolConfiguration(pointSize: 230, weight: .semibold)
-                .applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
-            guard let symbol = NSImage(systemSymbolName: "camera.fill", accessibilityDescription: nil)?
-                .withSymbolConfiguration(configuration) else { return true }
-
-            let symbolSize = symbol.size
-            symbol.draw(in: NSRect(
-                x: rect.midX - symbolSize.width / 2,
-                y: rect.midY - symbolSize.height / 2,
-                width: symbolSize.width,
-                height: symbolSize.height
-            ))
-            return true
-        }
-        NSApp.applicationIconImage = image
-    }
-
     // MARK: - Actions
 
     @objc private func captureArea(_ sender: Any?) {
@@ -309,6 +271,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let item = NSMenuItem(title: "Shortcut unavailable (error \(status))", action: nil, keyEquivalent: "")
         item.isEnabled = false
         statusMenu?.insertItem(item, at: 1)
-        statusItem.button?.toolTip = "sshooter: ⌘⇧2 shortcut unavailable (error \(status))"
+        statusItem.button?.toolTip = "sShooter: ⌘⇧2 shortcut unavailable (error \(status))"
     }
 }

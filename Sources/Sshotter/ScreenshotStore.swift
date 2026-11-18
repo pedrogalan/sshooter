@@ -40,7 +40,7 @@ final class ScreenshotStore {
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = true
         panel.prompt = "Choose"
-        panel.message = "Choose where sshooter saves screenshots."
+        panel.message = "Choose where sShooter saves screenshots."
         panel.directoryURL = saveFolderURL
             ?? fileManager.urls(for: .picturesDirectory, in: .userDomainMask).first
 

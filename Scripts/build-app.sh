@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_PATH="${1:-$PROJECT_DIR/dist/sshooter.app}"
+APP_PATH="${1:-$PROJECT_DIR/dist/sShooter.app}"
 CONTENTS_PATH="$APP_PATH/Contents"
 RESOURCES_PATH="$CONTENTS_PATH/Resources"
 
@@ -10,11 +10,22 @@ cd "$PROJECT_DIR"
 swift build --configuration release
 
 mkdir -p "$CONTENTS_PATH/MacOS"
+rm -rf "$RESOURCES_PATH"
 mkdir -p "$RESOURCES_PATH"
-cp "$PROJECT_DIR/.build/release/sshooter" "$CONTENTS_PATH/MacOS/sshooter"
-chmod 755 "$CONTENTS_PATH/MacOS/sshooter"
-cp "$PROJECT_DIR/Assets/AppIcon.png" "$RESOURCES_PATH/AppIcon.png"
+cp "$PROJECT_DIR/.build/release/sshooter" "$CONTENTS_PATH/MacOS/sShooter"
+chmod 755 "$CONTENTS_PATH/MacOS/sShooter"
 cp "$PROJECT_DIR/Assets/MenuBarIcon.png" "$RESOURCES_PATH/MenuBarIcon.png"
+
+# Build an .icns from the source PNG. CFBundleIconFile, the Dock, Cmd-Tab, and
+# Finder all expect an .icns rather than a raw PNG.
+ICONSET_DIR="$(mktemp -d)/AppIcon.iconset"
+mkdir -p "$ICONSET_DIR"
+for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$PROJECT_DIR/Assets/AppIcon.png" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null
+    sips -z "$((size * 2))" "$((size * 2))" "$PROJECT_DIR/Assets/AppIcon.png" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_PATH/AppIcon.icns"
+rm -rf "$(dirname "$ICONSET_DIR")"
 
 cat > "$CONTENTS_PATH/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -23,16 +34,18 @@ cat > "$CONTENTS_PATH/Info.plist" <<'PLIST'
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>sShooter</string>
 	<key>CFBundleExecutable</key>
-	<string>sshooter</string>
+	<string>sShooter</string>
 	<key>CFBundleIconFile</key>
-	<string>AppIcon.png</string>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.pedrogalan.sshooter</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>sshooter</string>
+	<string>sShooter</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -41,10 +54,14 @@ cat > "$CONTENTS_PATH/Info.plist" <<'PLIST'
 	<string>1</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>sshooter captures the screen area you select for a screenshot.</string>
+	<string>sShooter captures the screen area you select for a screenshot.</string>
 </dict>
 </plist>
 PLIST
