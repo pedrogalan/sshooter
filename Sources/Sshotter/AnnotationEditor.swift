@@ -2316,6 +2316,41 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             path.lineWidth = 1
             path.stroke()
         }
+
+        // A brief, unobtrusive reminder of the two ways out of a crop session.
+        let hint = NSAttributedString(
+            string: "Return to crop    ·    Esc to cancel",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+                .foregroundColor: NSColor.white.withAlphaComponent(0.92)
+            ]
+        )
+        let hintSize = hint.size()
+        let hintPadding = NSSize(width: 12, height: 6)
+        let pill = NSRect(
+            x: bounds.midX - (hintSize.width + hintPadding.width * 2) / 2,
+            y: bounds.maxY - (hintSize.height + hintPadding.height * 2) - 16,
+            width: ceil(hintSize.width) + hintPadding.width * 2,
+            height: ceil(hintSize.height) + hintPadding.height * 2
+        )
+        let pillPath = NSBezierPath(
+            roundedRect: pill,
+            xRadius: pill.height / 2,
+            yRadius: pill.height / 2
+        )
+        NSColor.black.withAlphaComponent(0.55).setFill()
+        pillPath.fill()
+        NSColor.white.withAlphaComponent(0.18).setStroke()
+        pillPath.lineWidth = 1
+        pillPath.stroke()
+        hint.draw(
+            in: NSRect(
+                x: pill.minX + hintPadding.width,
+                y: pill.minY + hintPadding.height,
+                width: hintSize.width,
+                height: hintSize.height
+            )
+        )
     }
 
     // MARK: Layout
