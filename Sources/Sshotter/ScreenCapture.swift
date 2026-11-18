@@ -173,8 +173,8 @@ final class CaptureModel {
         activeOverlay = nil
     }
 
-    private func showEditor(with image: CGImage) {
-        if ScreenshotStore.shared.autoSaveCaptures {
+    private func showEditor(with image: CGImage, autoSave: Bool = true) {
+        if autoSave, ScreenshotStore.shared.autoSaveCaptures {
             do {
                 _ = try ScreenshotStore.shared.saveCapture(image)
             } catch {
@@ -228,6 +228,27 @@ final class CaptureModel {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         editorWindow.reopen()
+    }
+
+    // TEMPORARY: opens the editor on a blank white canvas so the annotation UI
+    // can be exercised without capturing the screen. Remove this method, the
+    // `showBlankCanvas(_:)` action in App.swift, and its menu item before the
+    // next release (see the release procedure in AGENTS.md).
+    func showBlankCanvas() {
+        let size = CGSize(width: 1280, height: 800)
+        guard let context = CGContext(
+            data: nil,
+            width: Int(size.width),
+            height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return }
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(CGRect(origin: .zero, size: size))
+        guard let image = context.makeImage() else { return }
+        showEditor(with: image, autoSave: false)
     }
 
     private func copyToClipboard(_ image: NSImage) {

@@ -45,17 +45,23 @@ Always run `swift build` after making changes to verify the project compiles cle
 
 Use an annotated version tag such as `v1.0.0`. Keep the app name `sShooter.app` unchanged.
 
-1. Start from a clean, up-to-date `master` branch and confirm that the release tag and GitHub release do not already exist.
-2. Set `CFBundleShortVersionString` and increment `CFBundleVersion` in `Scripts/build-app.sh`.
-3. Add `releases/v<version>.md` with the user-visible changes and review the README for factual changes. Do not put the current version in the README.
-4. Build the universal app and archive on macOS:
+1. Remove the temporary **"Blank Canvas (Debug)"** menu item and its `showBlankCanvas(_:)` action in `Sources/Sshotter/App.swift`, plus the `showBlankCanvas()` method in `Sources/Sshotter/ScreenCapture.swift`. Confirm no temporary debug code remains:
+
+   ```bash
+   grep -rn "TEMPORARY\|Blank Canvas (Debug)\|showBlankCanvas" Sources
+   ```
+
+2. Start from a clean, up-to-date `master` branch and confirm that the release tag and GitHub release do not already exist.
+3. Set `CFBundleShortVersionString` and increment `CFBundleVersion` in `Scripts/build-app.sh`.
+4. Add `releases/v<version>.md` with the user-visible changes and review the README for factual changes. Do not put the current version in the README.
+5. Build the universal app and archive on macOS:
 
    ```bash
    ./Scripts/build-release.sh
    ```
 
    This creates `dist/sShooter.app` and `dist/sShooter-<version>-macos-universal.zip`. The archive contains the app bundle; `dist/` is ignored by Git.
-5. Verify the app version, both architectures, icon, signature, and archive:
+6. Verify the app version, both architectures, icon, signature, and archive:
 
    ```bash
    VERSION=1.0.0
@@ -69,7 +75,7 @@ Use an annotated version tag such as `v1.0.0`. Keep the app name `sShooter.app` 
    ```
 
    Confirm the app bundle inside the ZIP is named `sShooter.app`, with no version suffix.
-6. Review and stage the release changes, commit, and tag:
+7. Review and stage the release changes, commit, and tag:
 
    ```bash
    VERSION=1.0.0
@@ -79,7 +85,7 @@ Use an annotated version tag such as `v1.0.0`. Keep the app name `sShooter.app` 
    git tag -a "v${VERSION}" -m "sShooter ${VERSION}"
    git push origin master "v${VERSION}"
    ```
-7. Confirm `gh auth status`, then publish the archive and notes:
+8. Confirm `gh auth status`, then publish the archive and notes:
 
    ```bash
    VERSION=1.0.0
