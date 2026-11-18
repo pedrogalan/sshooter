@@ -2114,10 +2114,15 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         )
     }
 
-    /// Rounds a crop frame to whole pixels and clamps it inside the image, so
-    /// the exported result lands on exact pixel boundaries.
+    /// The region a crop session may select within: the current crop when one is
+    /// applied, otherwise the whole image. Cropping only ever shrinks, so the
+    /// pixels discarded by an earlier crop cannot be brought back by re-cropping.
+    private var cropBounds: CGRect { cropRect ?? imageBounds }
+
+    /// Rounds a crop frame to whole pixels and clamps it inside the selectable
+    /// region, so the exported result lands on exact pixel boundaries.
     private func integralCropRect(_ rect: CGRect) -> CGRect {
-        let bounds = imageBounds
+        let bounds = cropBounds
         let minX = floor(min(max(rect.minX, bounds.minX), bounds.maxX))
         let minY = floor(min(max(rect.minY, bounds.minY), bounds.maxY))
         let maxX = ceil(min(max(rect.maxX, bounds.minX), bounds.maxX))
@@ -2125,10 +2130,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
-    /// Clamps each edge of a crop frame to the image, so the frame never leaves
-    /// the captured pixels while it is being dragged.
-    private func clampCropToImage(_ rect: CGRect) -> CGRect {
-        let bounds = imageBounds
+    /// Clamps each edge of a crop frame to the selectable region, so the frame
+    /// never leaves the pixels that survive the crop while it is being dragged.
+    private func clampCropToBounds(_ rect: CGRect) -> CGRect {
+        let bounds = cropBounds
         let minX = min(max(rect.minX, bounds.minX), bounds.maxX)
         let maxX = min(max(rect.maxX, bounds.minX), bounds.maxX)
         let minY = min(max(rect.minY, bounds.minY), bounds.maxY)
@@ -2208,10 +2213,11 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         return nil
     }
 
-    /// A canvas point clamped to the image, used while editing the crop frame.
+    /// A canvas point clamped to the selectable region, used while editing the
+    /// crop frame.
     private func clampedCropPoint(_ pointInView: CGPoint) -> CGPoint {
         let content = viewToContent(clampedViewPoint(pointInView))
-        let bounds = imageBounds
+        let bounds = cropBounds
         return CGPoint(
             x: min(max(content.x, bounds.minX), bounds.maxX),
             y: min(max(content.y, bounds.minY), bounds.maxY)
@@ -2252,17 +2258,17 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
         switch drag {
         case .create(let start):
-            session.rect = clampCropToImage(normalizedRect(from: start, to: contentPoint))
+            session.rect = clampCropToBounds(normalizedRect(from: start, to: contentPoint))
         case .move:
             let origin = CGPoint(
                 x: contentPoint.x - session.grabOffset.x,
                 y: contentPoint.y - session.grabOffset.y
             )
-            session.rect = clampCropToImage(
+            session.rect = clampCropToBounds(
                 CGRect(origin: origin, size: session.originalRect.size)
             )
         case .resize(let handle):
-            session.rect = clampCropToImage(
+            session.rect = clampCropToBounds(
                 resizedCropRect(session.originalRect, handle: handle, to: contentPoint)
             )
         }
@@ -2387,10 +2393,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
         let scale = cameraScale
 
-        // Outside a crop session the content is clipped to the applied crop, so
-        // the canvas shows the cropped result. During a session the whole image
-        // stays visible and the crop is drawn as an adjustable overlay instead.
-        let cropClip = cropSession == nil ? cropRect.map { viewRect(for: $0) } : nil
+        // The content is always clipped to an applied crop, so pixels discarded
+        // by a crop stay gone — including while re-cropping. During a session
+        // the crop frame is drawn as an adjustable overlay on top of the clip.
+        let cropClip = cropRect.map { viewRect(for: $0) }
         if let cropClip {
             NSGraphicsContext.saveGraphicsState()
             NSBezierPath(rect: cropClip).addClip()
@@ -4290,12 +4296,13 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     /// Fits the content into the viewport with a border on every side. With a
-    /// crop applied this fits the crop frame; during a crop session it fits the
-    /// whole image plus annotations so nothing is hidden.
+    /// crop applied this fits the crop frame, whether or not a crop session is
+    /// active, so re-cropping never reveals the discarded pixels. With no crop
+    /// yet it fits the whole image plus annotations so nothing is hidden.
     private func fitCameraToContent() {
         guard screenshot != nil, bounds.width > 1, bounds.height > 1 else { return }
         let content: CGRect
-        if cropSession == nil, let cropRect {
+        if let cropRect {
             content = cropRect
         } else {
             content = contentBoundsForCamera
