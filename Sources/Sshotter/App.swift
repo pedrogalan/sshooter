@@ -79,17 +79,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
 
         menu.addItem(.separator())
 
-        // TEMPORARY: opens a blank canvas for testing the annotation tools.
-        // Remove this item and its action before the next release (see the
-        // release procedure in AGENTS.md).
-        let blankCanvasItem = NSMenuItem(
-            title: "Blank Canvas (Debug)",
-            action: #selector(showBlankCanvas(_:)),
-            keyEquivalent: ""
-        )
-        blankCanvasItem.target = self
-        menu.addItem(blankCanvasItem)
-
         let quitItem = NSMenuItem(
             title: "Quit",
             action: #selector(quit(_:)),
@@ -239,10 +228,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
 
     @objc private func closeEditor(_ sender: Any?) {
         CaptureModel.shared.closeEditor()
-    }
-
-    @objc private func showBlankCanvas(_ sender: Any?) {
-        CaptureModel.shared.showBlankCanvas()
     }
 
     @objc private func quit(_ sender: Any?) {

@@ -479,7 +479,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
             defer: false
         )
 
-        title = "Screenshot"
+        title = "sShooter"
         minSize = NSSize(width: 600, height: 420)
         isReleasedWhenClosed = false
         acceptsMouseMovedEvents = true
@@ -567,7 +567,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
 
     func present(image: CGImage) {
         canvas.setImage(image)
-        title = "Screenshot"
+        title = "sShooter"
 
         let isOnScreen = NSScreen.screens.contains { $0.visibleFrame.intersects(frame) }
         if !hasPositionedWindow || !isOnScreen {
