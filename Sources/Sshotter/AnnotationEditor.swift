@@ -4,41 +4,6 @@ import CoreImage
 
 // MARK: - Arrow style
 
-enum ArrowLineWidth: Int, CaseIterable {
-    case thin
-    case regular
-    case bold
-    case extraBold
-
-    var title: String {
-        switch self {
-        case .thin: "Thin"
-        case .regular: "Regular"
-        case .bold: "Bold"
-        case .extraBold: "Extra Bold"
-        }
-    }
-
-    var multiplier: CGFloat {
-        switch self {
-        case .thin: 0.6
-        case .regular: 1
-        case .bold: 1.7
-        case .extraBold: 2.6
-        }
-    }
-
-    /// Stroke width used by the little preview glyphs in the options panel.
-    var previewWidth: CGFloat {
-        switch self {
-        case .thin: 1.5
-        case .regular: 2.5
-        case .bold: 4
-        case .extraBold: 6
-        }
-    }
-}
-
 enum ArrowColor: Int, CaseIterable {
     case red
     case orange
@@ -144,7 +109,7 @@ enum SquarePreferences {
 
 enum ArrowPreferences {
     private static let colorKey = "arrowColor"
-    private static let lineWidthKey = "arrowLineWidth"
+    private static let lineWidthKey = "arrowStrokeWidth"
 
     static var color: ArrowColor {
         get {
@@ -160,17 +125,22 @@ enum ArrowPreferences {
         }
     }
 
-    static var lineWidth: ArrowLineWidth {
+    /// Continuous stroke width, as a multiple of the base stroke. Clamped to
+    /// the slider's range so hand-edited or stale values stay usable.
+    static var lineWidth: CGFloat {
         get {
             let defaults = UserDefaults.standard
-            guard defaults.object(forKey: lineWidthKey) != nil,
-                  let value = ArrowLineWidth(rawValue: defaults.integer(forKey: lineWidthKey)) else {
-                return .regular
+            guard defaults.object(forKey: lineWidthKey) != nil else {
+                return ArrowGeometry.defaultMultiplier
             }
-            return value
+            let value = CGFloat(defaults.double(forKey: lineWidthKey))
+            return min(
+                max(value, ArrowGeometry.minimumMultiplier),
+                ArrowGeometry.maximumMultiplier
+            )
         }
         set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: lineWidthKey)
+            UserDefaults.standard.set(Double(newValue), forKey: lineWidthKey)
         }
     }
 }
@@ -297,9 +267,17 @@ enum TextPreferences {
 }
 
 enum ArrowGeometry {
-    static func lineWidth(forImageSize size: CGSize, thickness: ArrowLineWidth) -> CGFloat {
+    /// Continuous stroke-width range, as multiples of the base stroke. Arrows
+    /// and squares share it. The narrow end is twice the old thinnest preset and
+    /// the wide end is three times the old thickest, so the slider reaches well
+    /// past the old presets on the thick side.
+    static let minimumMultiplier: CGFloat = 1.2
+    static let maximumMultiplier: CGFloat = 7.8
+    static let defaultMultiplier: CGFloat = 1.7
+
+    static func lineWidth(forImageSize size: CGSize, multiplier: CGFloat) -> CGFloat {
         let base = max(3, min(size.width, size.height) * 0.003)
-        return base * thickness.multiplier
+        return base * multiplier
     }
 
     /// The head scales with the line, so thicker arrows get proportionally
@@ -872,53 +850,9 @@ private final class ColorSwatchButton: HoverButton {
     }
 }
 
-@MainActor
-private final class ThicknessButton: HoverButton {
-    let thickness: ArrowLineWidth
-    private(set) var isSelected = false {
-        didSet { needsDisplay = true }
-    }
-
-    init(thickness: ArrowLineWidth) {
-        self.thickness = thickness
-        super.init(frame: .zero)
-        toolTip = "\(thickness.title) stroke"
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    func setSelected(_ selected: Bool) {
-        isSelected = selected
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        if isSelected || isHovered {
-            let color: NSColor = isSelected
-                ? NSColor.controlAccentColor.withAlphaComponent(0.16)
-                : NSColor.labelColor.withAlphaComponent(0.07)
-            color.setFill()
-            NSBezierPath(
-                roundedRect: bounds.insetBy(dx: 1, dy: 1),
-                xRadius: 6,
-                yRadius: 6
-            ).fill()
-        }
-
-        let path = NSBezierPath()
-        path.move(to: NSPoint(x: bounds.midX - 8, y: bounds.midY))
-        path.line(to: NSPoint(x: bounds.midX + 8, y: bounds.midY))
-        path.lineWidth = thickness.previewWidth
-        path.lineCapStyle = .round
-        (isSelected ? NSColor.controlAccentColor : NSColor.labelColor).setStroke()
-        path.stroke()
-    }
-}
-
-/// A short diagonal stroke preview matching the thickness-button glyphs but
-/// tilted, so the line weight reads more clearly at a glance. The narrow and
-/// wide versions flank the highlight slider as its labels.
+/// A short diagonal stroke preview, tilted so the line weight reads clearly at
+/// a glance. The narrow and wide versions flank the stroke-width slider as its
+/// labels.
 @MainActor
 private final class StrokeWidthGlyph: NSView {
     /// Tilt away from horizontal, in degrees. A slash reads better than a flat
@@ -951,6 +885,30 @@ private final class StrokeWidthGlyph: NSView {
     }
 }
 
+/// Draws a solid accent-coloured knob with a darker rim. The stock slider knob
+/// is a very light grey that is hard to pick out against the panel, especially
+/// at the small control size this slider uses.
+private final class StrokeWidthSliderCell: NSSliderCell {
+    override func drawKnob(_ knobRect: NSRect) {
+        let diameter = min(knobRect.width, knobRect.height)
+        let rect = NSRect(
+            x: knobRect.midX - diameter / 2,
+            y: knobRect.midY - diameter / 2,
+            width: diameter,
+            height: diameter
+        ).insetBy(dx: 0.5, dy: 0.5)
+
+        let path = NSBezierPath(ovalIn: rect)
+        NSColor.controlAccentColor.setFill()
+        path.fill()
+
+        let rim = NSColor.controlAccentColor.blended(withFraction: 0.45, of: .black) ?? .black
+        rim.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+}
+
 /// An `NSSlider` that reports when a drag begins and ends, so the canvas can
 /// register a single undo step for a whole drag instead of one per tick.
 @MainActor
@@ -960,6 +918,8 @@ private final class StrokeWidthSlider: NSSlider {
 
     init() {
         super.init(frame: .zero)
+        cell = StrokeWidthSliderCell()
+        isContinuous = true
     }
 
     required init?(coder: NSCoder) {
@@ -1166,28 +1126,29 @@ private final class ArrowOptionsPanel: NSView {
     private static let swatchSpacing: CGFloat = 6
     private static let thicknessSize: CGFloat = 28
     private static let thicknessSpacing: CGFloat = 2
-    private static let highlightSliderWidth: CGFloat = 118
-    private static let highlightGlyphSize: CGFloat = 22
+    private static let widthSliderWidth: CGFloat = 118
+    private static let widthGlyphSize: CGFloat = 22
+    /// Preview stroke widths for the slider's flanking glyphs.
+    private static let thinPreviewWidth: CGFloat = 1.5
+    private static let thickPreviewWidth: CGFloat = 6
     private static let horizontalPadding: CGFloat = 10
     private static let dividerGap: CGFloat = 12
     private static let roundedGap: CGFloat = 6
     private static let panelHeight: CGFloat = 44
 
     var onColorSelected: (@MainActor (ArrowColor) -> Void)?
-    var onThicknessSelected: (@MainActor (ArrowLineWidth) -> Void)?
     var onRoundedChanged: (@MainActor (Bool) -> Void)?
     var onFillChanged: (@MainActor (SquareFill) -> Void)?
+    var onStrokeWidthChanged: (@MainActor (CGFloat) -> Void)?
+    var onStrokeWidthEditBegan: (@MainActor () -> Void)?
+    var onStrokeWidthEditEnded: (@MainActor () -> Void)?
     var onHighlightColorSelected: (@MainActor (ArrowColor) -> Void)?
-    var onHighlightWidthChanged: (@MainActor (CGFloat) -> Void)?
-    var onHighlightWidthEditBegan: (@MainActor () -> Void)?
-    var onHighlightWidthEditEnded: (@MainActor () -> Void)?
     var onTextColorSelected: (@MainActor (ArrowColor) -> Void)?
     var onBackgroundSelected: (@MainActor (TextBackground) -> Void)?
     var onTextSizeChanged: (@MainActor (Bool) -> Void)?
 
     private(set) var mode: Mode = .arrow
     private var swatchButtons: [ColorSwatchButton] = []
-    private var thicknessButtons: [ThicknessButton] = []
     private let colorDivider = NSBox()
     private let squareDivider = NSBox()
     private let textDivider = NSBox()
@@ -1196,12 +1157,13 @@ private final class ArrowOptionsPanel: NSView {
     private var backgroundButtons: [BackgroundSwatchButton] = []
     private var sizeDecreaseButton = TextSizeButton(increase: false)
     private var sizeIncreaseButton = TextSizeButton(increase: true)
-    private let highlightSlider = StrokeWidthSlider()
-    private let thinGlyph = StrokeWidthGlyph(previewWidth: ArrowLineWidth.thin.previewWidth)
-    private let thickGlyph = StrokeWidthGlyph(previewWidth: ArrowLineWidth.extraBold.previewWidth)
-    private var isAdjustingHighlightWidth = false
+    private let widthSlider = StrokeWidthSlider()
+    private let thinGlyph = StrokeWidthGlyph(previewWidth: ArrowOptionsPanel.thinPreviewWidth)
+    private let thickGlyph = StrokeWidthGlyph(previewWidth: ArrowOptionsPanel.thickPreviewWidth)
+    private var isAdjustingWidth = false
     private var isRounded = SquarePreferences.isRounded
     private var fill = SquarePreferences.fill
+    private var arrowWidth = ArrowPreferences.lineWidth
     private var highlightColor = HighlightPreferences.color
     private var highlightWidth = HighlightPreferences.lineWidth
     private var textColor = TextPreferences.color
@@ -1230,8 +1192,27 @@ private final class ArrowOptionsPanel: NSView {
     func setMode(_ mode: Mode) {
         guard self.mode != mode else { return }
         self.mode = mode
+        syncSliderToMode()
         layoutControls()
         needsDisplay = true
+    }
+
+    /// Points the shared slider at the active tool's own range and value. Arrows
+    /// and squares share one range; the highlight marker keeps a wider, chunkier
+    /// one of its own.
+    private func syncSliderToMode() {
+        switch mode {
+        case .arrow, .square:
+            widthSlider.minValue = Double(ArrowGeometry.minimumMultiplier)
+            widthSlider.maxValue = Double(ArrowGeometry.maximumMultiplier)
+            widthSlider.doubleValue = Double(arrowWidth)
+        case .highlight:
+            widthSlider.minValue = Double(HighlightGeometry.minimumMultiplier)
+            widthSlider.maxValue = Double(HighlightGeometry.maximumMultiplier)
+            widthSlider.doubleValue = Double(highlightWidth)
+        case .text:
+            break
+        }
     }
 
     private func buildSubviews() {
@@ -1247,34 +1228,22 @@ private final class ArrowOptionsPanel: NSView {
         colorDivider.boxType = .separator
         addSubview(colorDivider)
 
-        for thickness in ArrowLineWidth.allCases {
-            let button = ThicknessButton(thickness: thickness)
-            button.tag = thickness.rawValue
-            button.target = self
-            button.action = #selector(selectThickness(_:))
-            addSubview(button)
-            thicknessButtons.append(button)
+        widthSlider.controlSize = .small
+        widthSlider.toolTip = "Stroke thickness"
+        widthSlider.target = self
+        widthSlider.action = #selector(widthSliderChanged(_:))
+        widthSlider.onTrackingBegan = { [weak self] in
+            self?.isAdjustingWidth = true
+            self?.onStrokeWidthEditBegan?()
         }
-
-        highlightSlider.minValue = Double(HighlightGeometry.minimumMultiplier)
-        highlightSlider.maxValue = Double(HighlightGeometry.maximumMultiplier)
-        highlightSlider.doubleValue = Double(highlightWidth)
-        highlightSlider.isContinuous = true
-        highlightSlider.controlSize = .small
-        highlightSlider.toolTip = "Highlight thickness"
-        highlightSlider.target = self
-        highlightSlider.action = #selector(highlightSliderChanged(_:))
-        highlightSlider.onTrackingBegan = { [weak self] in
-            self?.isAdjustingHighlightWidth = true
-            self?.onHighlightWidthEditBegan?()
+        widthSlider.onTrackingEnded = { [weak self] in
+            self?.isAdjustingWidth = false
+            self?.onStrokeWidthEditEnded?()
         }
-        highlightSlider.onTrackingEnded = { [weak self] in
-            self?.isAdjustingHighlightWidth = false
-            self?.onHighlightWidthEditEnded?()
-        }
-        addSubview(highlightSlider)
+        addSubview(widthSlider)
         addSubview(thinGlyph)
         addSubview(thickGlyph)
+        syncSliderToMode()
 
         squareDivider.boxType = .separator
         addSubview(squareDivider)
@@ -1317,20 +1286,17 @@ private final class ArrowOptionsPanel: NSView {
     }
 
     /// Lays out the controls for the current mode and resizes the panel to fit.
-    /// Arrow mode shows color and thickness; square mode adds the corners and
-    /// fill levels; text mode shows text color, background color, and size.
+    /// Arrow and square modes show color and a stroke-width slider; square mode
+    /// adds the corners and fill levels; the highlight mode shows its own colour
+    /// swatches and slider; text mode shows text color, background, and size.
     private func layoutControls() {
-        let showsThickness = mode == .arrow || mode == .square
-        let showsHighlightSlider = mode == .highlight
+        let showsWidthSlider = mode == .arrow || mode == .square || mode == .highlight
         let showsSquareControls = mode == .square
         let showsTextControls = mode == .text
 
-        for button in thicknessButtons {
-            button.isHidden = !showsThickness
-        }
-        highlightSlider.isHidden = !showsHighlightSlider
-        thinGlyph.isHidden = !showsHighlightSlider
-        thickGlyph.isHidden = !showsHighlightSlider
+        widthSlider.isHidden = !showsWidthSlider
+        thinGlyph.isHidden = !showsWidthSlider
+        thickGlyph.isHidden = !showsWidthSlider
         squareDivider.isHidden = !showsSquareControls
         roundedButton.isHidden = !showsSquareControls
         for button in fillButtons {
@@ -1359,43 +1325,31 @@ private final class ArrowOptionsPanel: NSView {
         colorDivider.frame = NSRect(x: x, y: 10, width: 1, height: Self.panelHeight - 20)
         x += 1 + Self.dividerGap
 
-        if showsThickness {
-            for button in thicknessButtons {
-                button.frame = NSRect(
-                    x: x,
-                    y: (Self.panelHeight - Self.thicknessSize) / 2,
-                    width: Self.thicknessSize,
-                    height: Self.thicknessSize
-                )
-                x += Self.thicknessSize + Self.thicknessSpacing
-            }
-        }
-
-        if showsHighlightSlider {
-            let glyphY = (Self.panelHeight - Self.highlightGlyphSize) / 2
+        if showsWidthSlider {
+            let glyphY = (Self.panelHeight - Self.widthGlyphSize) / 2
             thinGlyph.frame = NSRect(
                 x: x,
                 y: glyphY,
-                width: Self.highlightGlyphSize,
-                height: Self.highlightGlyphSize
+                width: Self.widthGlyphSize,
+                height: Self.widthGlyphSize
             )
-            x += Self.highlightGlyphSize
+            x += Self.widthGlyphSize
 
-            highlightSlider.frame = NSRect(
+            widthSlider.frame = NSRect(
                 x: x,
-                y: (Self.panelHeight - highlightSlider.intrinsicContentSize.height) / 2,
-                width: Self.highlightSliderWidth,
-                height: highlightSlider.intrinsicContentSize.height
+                y: (Self.panelHeight - widthSlider.intrinsicContentSize.height) / 2,
+                width: Self.widthSliderWidth,
+                height: widthSlider.intrinsicContentSize.height
             )
-            x += Self.highlightSliderWidth
+            x += Self.widthSliderWidth
 
             thickGlyph.frame = NSRect(
                 x: x,
                 y: glyphY,
-                width: Self.highlightGlyphSize,
-                height: Self.highlightGlyphSize
+                width: Self.widthGlyphSize,
+                height: Self.widthGlyphSize
             )
-            x += Self.highlightGlyphSize
+            x += Self.widthGlyphSize + Self.thicknessSpacing
         }
 
         if showsSquareControls {
@@ -1449,17 +1403,19 @@ private final class ArrowOptionsPanel: NSView {
         }
 
         // `x` ends one spacing past the last control; trim it before padding.
-        let trailingGap = showsHighlightSlider ? 0 : Self.thicknessSpacing
-        let width = x - trailingGap + Self.horizontalPadding
+        let width = x - Self.thicknessSpacing + Self.horizontalPadding
         frame = NSRect(origin: frame.origin, size: NSSize(width: width, height: Self.panelHeight))
     }
 
-    func updateSelection(color: ArrowColor, thickness: ArrowLineWidth) {
+    /// Arrow and square mode: highlights the chosen colour and points the shared
+    /// slider at the chosen width.
+    func updateSelection(color: ArrowColor, width: CGFloat) {
+        arrowWidth = width
         for button in swatchButtons {
             button.setSelected(button.tag == color.rawValue)
         }
-        for button in thicknessButtons {
-            button.setSelected(button.tag == thickness.rawValue)
+        if mode == .arrow || mode == .square {
+            widthSlider.doubleValue = Double(width)
         }
     }
 
@@ -1478,7 +1434,9 @@ private final class ArrowOptionsPanel: NSView {
         for button in swatchButtons {
             button.setSelected(button.tag == color.rawValue)
         }
-        highlightSlider.doubleValue = Double(width)
+        if mode == .highlight {
+            widthSlider.doubleValue = Double(width)
+        }
     }
 
     func updateTextSelection(color: ArrowColor, background: TextBackground) {
@@ -1515,7 +1473,7 @@ private final class ArrowOptionsPanel: NSView {
             updateHighlightSelection(color: color, width: highlightWidth)
             onHighlightColorSelected?(color)
         } else {
-            updateSelection(color: color, thickness: currentThicknessFromButtons())
+            updateSelection(color: color, width: arrowWidth)
             onColorSelected?(color)
         }
     }
@@ -1529,21 +1487,23 @@ private final class ArrowOptionsPanel: NSView {
         onTextSizeChanged?(sender.increases)
     }
 
-    @objc private func selectThickness(_ sender: NSButton) {
-        guard let thickness = ArrowLineWidth(rawValue: sender.tag) else { return }
-        updateSelection(color: currentColorFromButtons(), thickness: thickness)
-        onThicknessSelected?(thickness)
-    }
-
-    @objc private func highlightSliderChanged(_ sender: NSSlider) {
-        highlightWidth = CGFloat(sender.doubleValue)
-        if isAdjustingHighlightWidth {
-            onHighlightWidthChanged?(highlightWidth)
+    @objc private func widthSliderChanged(_ sender: NSSlider) {
+        let width = CGFloat(sender.doubleValue)
+        switch mode {
+        case .arrow, .square:
+            arrowWidth = width
+        case .highlight:
+            highlightWidth = width
+        case .text:
+            break
+        }
+        if isAdjustingWidth {
+            onStrokeWidthChanged?(width)
         } else {
             // Keyboard or accessibility changes fire without a tracking loop.
-            onHighlightWidthEditBegan?()
-            onHighlightWidthChanged?(highlightWidth)
-            onHighlightWidthEditEnded?()
+            onStrokeWidthEditBegan?()
+            onStrokeWidthChanged?(width)
+            onStrokeWidthEditEnded?()
         }
     }
 
@@ -1551,12 +1511,6 @@ private final class ArrowOptionsPanel: NSView {
         guard let tag = swatchButtons.first(where: { $0.isSelected })?.tag,
               let color = ArrowColor(rawValue: tag) else { return .red }
         return color
-    }
-
-    private func currentThicknessFromButtons() -> ArrowLineWidth {
-        guard let tag = thicknessButtons.first(where: { $0.isSelected })?.tag,
-              let thickness = ArrowLineWidth(rawValue: tag) else { return .regular }
-        return thickness
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -1594,22 +1548,22 @@ private final class ArrowOptionsPanel: NSView {
 
 @MainActor
 private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
-    private struct Arrow {
+    private struct Arrow: Equatable {
         var start: CGPoint
         var end: CGPoint
         var color: ArrowColor
-        var thickness: ArrowLineWidth
+        var thickness: CGFloat
     }
 
-    private struct Square {
+    private struct Square: Equatable {
         var rect: CGRect
         var color: ArrowColor
-        var thickness: ArrowLineWidth
+        var thickness: CGFloat
         var isRounded: Bool
         var fill: SquareFill
     }
 
-    private struct BlurRegion {
+    private struct BlurRegion: Equatable {
         var rect: CGRect
     }
 
@@ -1625,7 +1579,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     /// A text annotation. `origin` is the top-left of the text in image units;
     /// the optional background rectangle is derived from the text metrics at
     /// draw time.
-    private struct TextNote {
+    private struct TextNote: Equatable {
         var origin: CGPoint
         var text: String
         var fontSize: CGFloat
@@ -1633,7 +1587,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         var background: TextBackground
     }
 
-    private struct AnnotationSnapshot {
+    private struct AnnotationSnapshot: Equatable {
         var arrows: [Arrow]
         var squares: [Square]
         var blurRegions: [BlurRegion]
@@ -1699,7 +1653,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var dragMode: DragMode?
     private var pointerPosition: CGPoint?
     private var drawingHighlightPoints: [CGPoint] = []
-    private var highlightWidthUndoSnapshot: AnnotationSnapshot?
+    private var strokeWidthUndoSnapshot: AnnotationSnapshot?
     private var currentColor = ArrowPreferences.color
     private var currentThickness = ArrowPreferences.lineWidth
     private var currentRounded = SquarePreferences.isRounded
@@ -1745,26 +1699,23 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         optionsPanel.onColorSelected = { [weak self] color in
             self?.applyColor(color)
         }
-        optionsPanel.onThicknessSelected = { [weak self] thickness in
-            self?.applyThickness(thickness)
-        }
         optionsPanel.onRoundedChanged = { [weak self] rounded in
             self?.applyRounded(rounded)
         }
         optionsPanel.onFillChanged = { [weak self] fill in
             self?.applyFill(fill)
         }
+        optionsPanel.onStrokeWidthChanged = { [weak self] width in
+            self?.applyStrokeWidth(width)
+        }
+        optionsPanel.onStrokeWidthEditBegan = { [weak self] in
+            self?.beginStrokeWidthEdit()
+        }
+        optionsPanel.onStrokeWidthEditEnded = { [weak self] in
+            self?.endStrokeWidthEdit()
+        }
         optionsPanel.onHighlightColorSelected = { [weak self] color in
             self?.applyHighlightColor(color)
-        }
-        optionsPanel.onHighlightWidthChanged = { [weak self] width in
-            self?.applyHighlightWidth(width)
-        }
-        optionsPanel.onHighlightWidthEditBegan = { [weak self] in
-            self?.beginHighlightWidthEdit()
-        }
-        optionsPanel.onHighlightWidthEditEnded = { [weak self] in
-            self?.endHighlightWidthEdit()
         }
         optionsPanel.onTextColorSelected = { [weak self] color in
             self?.applyTextColor(color)
@@ -1775,7 +1726,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         optionsPanel.onTextSizeChanged = { [weak self] increase in
             self?.adjustTextSize(increase: increase)
         }
-        optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        optionsPanel.updateSelection(color: currentColor, width: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
         optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
@@ -1819,7 +1770,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         pointerPosition = nil
         drawingHighlightPoints = []
         hasCamera = false
-        optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        optionsPanel.updateSelection(color: currentColor, width: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
         optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
@@ -1852,7 +1803,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         drawingHighlightPoints = []
         blurredScreenshot = nil
         blurredScreenshotImage = nil
-        optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        optionsPanel.updateSelection(color: currentColor, width: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
         optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
@@ -1894,7 +1845,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         if tool == .blur {
             ensureBlurredScreenshot()
         }
-        optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        optionsPanel.updateSelection(color: currentColor, width: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
         optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
@@ -1993,7 +1944,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         for arrow in arrows {
             let lineWidth = ArrowGeometry.lineWidth(
                 forImageSize: imageSize,
-                thickness: arrow.thickness
+                multiplier: arrow.thickness
             )
             let headLength = ArrowGeometry.headLength(forLineWidth: lineWidth)
             drawArrow(
@@ -2008,7 +1959,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         if let pointerPosition, case .drawingArrow(let start)? = dragMode {
             let lineWidth = ArrowGeometry.lineWidth(
                 forImageSize: imageSize,
-                thickness: currentThickness
+                multiplier: currentThickness
             )
             let headLength = ArrowGeometry.headLength(forLineWidth: lineWidth)
             drawArrow(
@@ -2084,7 +2035,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private func drawSquare(_ square: Square, imageSize: CGSize, scale: CGFloat) {
         let lineWidth = ArrowGeometry.lineWidth(
             forImageSize: imageSize,
-            thickness: square.thickness
+            multiplier: square.thickness
         ) * scale
         let path = squarePath(
             in: viewRect(for: square.rect),
@@ -2750,7 +2701,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             }
         } else {
             selection = nil
-            optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+            optionsPanel.updateSelection(color: currentColor, width: currentThickness)
             optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
             optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
             optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
@@ -3093,7 +3044,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         let arrow = arrows[index]
         currentColor = arrow.color
         currentThickness = arrow.thickness
-        optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        optionsPanel.updateSelection(color: currentColor, width: currentThickness)
         updateOptionsVisibility()
     }
 
@@ -3105,7 +3056,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         currentThickness = square.thickness
         currentRounded = square.isRounded
         currentFill = square.fill
-        optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        optionsPanel.updateSelection(color: currentColor, width: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
         updateOptionsVisibility()
     }
@@ -3156,23 +3107,6 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         window?.makeFirstResponder(self)
     }
 
-    private func applyThickness(_ thickness: ArrowLineWidth) {
-        let before = annotationSnapshot()
-        var changedAnnotation = false
-        currentThickness = thickness
-        ArrowPreferences.lineWidth = thickness
-        if case .arrow(let index)? = selection, arrows.indices.contains(index) {
-            arrows[index].thickness = thickness
-            changedAnnotation = true
-        } else if case .square(let index)? = selection, squares.indices.contains(index) {
-            squares[index].thickness = thickness
-            changedAnnotation = true
-        }
-        if changedAnnotation { registerAnnotationUndo(restoring: before, actionName: "Change Thickness") }
-        needsDisplay = true
-        window?.makeFirstResponder(self)
-    }
-
     private func applyRounded(_ rounded: Bool) {
         let before = annotationSnapshot()
         var changedAnnotation = false
@@ -3216,27 +3150,47 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     /// Captures the pre-drag state so a whole slider drag registers one undo.
-    private func beginHighlightWidthEdit() {
-        highlightWidthUndoSnapshot = annotationSnapshot()
+    private func beginStrokeWidthEdit() {
+        strokeWidthUndoSnapshot = annotationSnapshot()
     }
 
     /// Live preview while the slider moves: resizes the selected stroke, if any,
     /// and remembers the choice for the next one. No undo step is registered.
-    private func applyHighlightWidth(_ width: CGFloat) {
-        currentHighlightWidth = width
-        if case .highlight(let index)? = selection, highlights.indices.contains(index) {
-            highlights[index].thickness = width
+    /// The slider is shared, so the width is routed by the panel's current mode.
+    private func applyStrokeWidth(_ width: CGFloat) {
+        switch optionsMode {
+        case .highlight?:
+            currentHighlightWidth = width
+            if case .highlight(let index)? = selection, highlights.indices.contains(index) {
+                highlights[index].thickness = width
+            }
+        case .arrow?, .square?:
+            currentThickness = width
+            if case .arrow(let index)? = selection, arrows.indices.contains(index) {
+                arrows[index].thickness = width
+            } else if case .square(let index)? = selection, squares.indices.contains(index) {
+                squares[index].thickness = width
+            }
+        default:
+            break
         }
         needsDisplay = true
     }
 
     /// Persists the width and registers a single undo step for the drag.
-    private func endHighlightWidthEdit() {
-        HighlightPreferences.lineWidth = currentHighlightWidth
-        if let snapshot = highlightWidthUndoSnapshot, snapshot.highlights != highlights {
-            registerAnnotationUndo(restoring: snapshot, actionName: "Change Highlight Thickness")
+    private func endStrokeWidthEdit() {
+        switch optionsMode {
+        case .highlight?:
+            HighlightPreferences.lineWidth = currentHighlightWidth
+        case .arrow?, .square?:
+            ArrowPreferences.lineWidth = currentThickness
+        default:
+            break
         }
-        highlightWidthUndoSnapshot = nil
+        if let snapshot = strokeWidthUndoSnapshot, snapshot != annotationSnapshot() {
+            registerAnnotationUndo(restoring: snapshot, actionName: "Change Thickness")
+        }
+        strokeWidthUndoSnapshot = nil
         window?.makeFirstResponder(self)
     }
 
@@ -3360,7 +3314,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         }
         if selection != nil {
             selection = nil
-            optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+            optionsPanel.updateSelection(color: currentColor, width: currentThickness)
             optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
             updateOptionsVisibility()
             needsDisplay = true
@@ -3392,7 +3346,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         }
         registerAnnotationUndo(restoring: before, actionName: "Delete Annotation")
         self.selection = nil
-        optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
+        optionsPanel.updateSelection(color: currentColor, width: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
         optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
         updateOptionsVisibility()
@@ -3488,7 +3442,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         for index in arrows.indices.reversed() {
             let lineWidth = ArrowGeometry.lineWidth(
                 forImageSize: imageSize,
-                thickness: arrows[index].thickness
+                multiplier: arrows[index].thickness
             )
             let bodyTolerance = max(6, lineWidth * scale * 2.5)
             let start = contentToView(arrows[index].start)
@@ -3512,7 +3466,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             let rect = viewRect(for: square.rect)
             let strokeWidth = ArrowGeometry.lineWidth(
                 forImageSize: imageSize,
-                thickness: square.thickness
+                multiplier: square.thickness
             ) * scale
             let tolerance = max(4, strokeWidth)
             let outer = rect.insetBy(dx: -tolerance, dy: -tolerance)
@@ -3894,7 +3848,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         for square in squares {
             let lineWidth = ArrowGeometry.lineWidth(
                 forImageSize: imageSize,
-                thickness: square.thickness
+                multiplier: square.thickness
             )
             let rect = exportRect(
                 square.rect,
@@ -3928,7 +3882,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         for arrow in arrows {
             let lineWidth = ArrowGeometry.lineWidth(
                 forImageSize: imageSize,
-                thickness: arrow.thickness
+                multiplier: arrow.thickness
             )
             let headLength = ArrowGeometry.headLength(forLineWidth: lineWidth)
             context.setStrokeColor(arrow.color.cgColor)
@@ -3970,7 +3924,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     /// Bounds of an arrow including its stroke and arrowhead, in image units.
     private func arrowBounds(for arrow: Arrow, imageSize: CGSize) -> CGRect {
-        let lineWidth = ArrowGeometry.lineWidth(forImageSize: imageSize, thickness: arrow.thickness)
+        let lineWidth = ArrowGeometry.lineWidth(forImageSize: imageSize, multiplier: arrow.thickness)
         let headLength = ArrowGeometry.headLength(forLineWidth: lineWidth)
         let path = ArrowGeometry.path(
             from: arrow.start,
@@ -3984,7 +3938,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     /// Bounds of a square including its stroke, in image units.
     private func squareBounds(for square: Square, imageSize: CGSize) -> CGRect {
-        let lineWidth = ArrowGeometry.lineWidth(forImageSize: imageSize, thickness: square.thickness)
+        let lineWidth = ArrowGeometry.lineWidth(forImageSize: imageSize, multiplier: square.thickness)
         let strokePadding = lineWidth / 2 + 1
         return square.rect.insetBy(dx: -strokePadding, dy: -strokePadding)
     }
