@@ -25,7 +25,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "camera", accessibilityDescription: "sshooter")
+            if let url = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png"),
+               let image = NSImage(contentsOf: url) {
+                image.isTemplate = true
+                image.size = NSSize(width: 18, height: 18)
+                button.image = image
+            } else {
+                button.image = NSImage(systemSymbolName: "camera", accessibilityDescription: "sshooter")
+            }
         }
 
         buildStatusMenu()
@@ -213,9 +220,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     // MARK: - Application icon
 
-    /// A generated Dock icon, shown only while the app is promoted to a regular
-    /// app (i.e. while the editor is open).
+    /// Sets the app icon shown in the Dock while the app runs as a regular app.
     private func configureApplicationIcon() {
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
+           let appIcon = NSImage(contentsOf: url) {
+            NSApp.applicationIconImage = appIcon
+            return
+        }
+
         let size = NSSize(width: 512, height: 512)
         let image = NSImage(size: size, flipped: false) { rect in
             let background = NSBezierPath(

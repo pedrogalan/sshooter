@@ -4,13 +4,17 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_PATH="${1:-$PROJECT_DIR/dist/sshooter.app}"
 CONTENTS_PATH="$APP_PATH/Contents"
+RESOURCES_PATH="$CONTENTS_PATH/Resources"
 
 cd "$PROJECT_DIR"
 swift build --configuration release
 
 mkdir -p "$CONTENTS_PATH/MacOS"
+mkdir -p "$RESOURCES_PATH"
 cp "$PROJECT_DIR/.build/release/sshooter" "$CONTENTS_PATH/MacOS/sshooter"
 chmod 755 "$CONTENTS_PATH/MacOS/sshooter"
+cp "$PROJECT_DIR/Assets/AppIcon.png" "$RESOURCES_PATH/AppIcon.png"
+cp "$PROJECT_DIR/Assets/MenuBarIcon.png" "$RESOURCES_PATH/MenuBarIcon.png"
 
 cat > "$CONTENTS_PATH/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -21,6 +25,8 @@ cat > "$CONTENTS_PATH/Info.plist" <<'PLIST'
 	<string>en</string>
 	<key>CFBundleExecutable</key>
 	<string>sshooter</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon.png</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.pedrogalan.sshooter</string>
 	<key>CFBundleInfoDictionaryVersion</key>
