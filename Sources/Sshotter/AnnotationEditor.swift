@@ -49,8 +49,49 @@ enum AnnotationTool {
     case arrow
     case square
     case blur
+    case pencil
     case highlight
     case text
+}
+
+/// The two freehand tools share one stroke model and the same smoothing. They
+/// differ only in how thick the base stroke is and how opaque the result is: a
+/// pencil is a thin, solid line, a marker is a broad, translucent one.
+enum FreehandStyle: Int {
+    case pencil
+    case highlight
+
+    /// Base stroke width, as a fraction of the image's smaller dimension.
+    var baseScale: CGFloat {
+        switch self {
+        case .pencil: 0.003
+        case .highlight: 0.012
+        }
+    }
+
+    /// Floor for the base stroke, so small captures still get a usable line.
+    var baseMinimum: CGFloat {
+        switch self {
+        case .pencil: 3
+        case .highlight: 8
+        }
+    }
+
+    /// Pencils are solid; markers are translucent so what they cover stays
+    /// readable.
+    var alpha: CGFloat {
+        switch self {
+        case .pencil: 1
+        case .highlight: 0.4
+        }
+    }
+
+    var defaultColor: ArrowColor {
+        switch self {
+        case .pencil: .red
+        case .highlight: .yellow
+        }
+    }
 }
 
 /// Fill levels for the square tool. `full` means fully transparent (outline
@@ -145,44 +186,50 @@ enum ArrowPreferences {
     }
 }
 
-enum HighlightPreferences {
-    private static let colorKey = "highlightColor"
-    private static let lineWidthKey = "highlightStrokeWidth"
-
-    /// Marker strokes are translucent so whatever they cover stays readable.
-    static let alpha: CGFloat = 0.4
-
-    static var color: ArrowColor {
-        get {
-            let defaults = UserDefaults.standard
-            guard defaults.object(forKey: colorKey) != nil,
-                  let value = ArrowColor(rawValue: defaults.integer(forKey: colorKey)) else {
-                return .yellow
-            }
-            return value
-        }
-        set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: colorKey)
+enum FreehandPreferences {
+    private static func colorKey(for style: FreehandStyle) -> String {
+        switch style {
+        case .pencil: "pencilColor"
+        case .highlight: "highlightColor"
         }
     }
 
-    /// Continuous marker width, as a multiple of the base stroke. Clamped to
-    /// the slider's range so hand-edited or stale values stay usable.
-    static var lineWidth: CGFloat {
-        get {
-            let defaults = UserDefaults.standard
-            guard defaults.object(forKey: lineWidthKey) != nil else {
-                return HighlightGeometry.defaultMultiplier
-            }
-            let value = CGFloat(defaults.double(forKey: lineWidthKey))
-            return min(
-                max(value, HighlightGeometry.minimumMultiplier),
-                HighlightGeometry.maximumMultiplier
-            )
+    private static func widthKey(for style: FreehandStyle) -> String {
+        switch style {
+        case .pencil: "pencilStrokeWidth"
+        case .highlight: "highlightStrokeWidth"
         }
-        set {
-            UserDefaults.standard.set(Double(newValue), forKey: lineWidthKey)
+    }
+
+    static func color(for style: FreehandStyle) -> ArrowColor {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: colorKey(for: style)) != nil,
+              let value = ArrowColor(rawValue: defaults.integer(forKey: colorKey(for: style))) else {
+            return style.defaultColor
         }
+        return value
+    }
+
+    static func setColor(_ color: ArrowColor, for style: FreehandStyle) {
+        UserDefaults.standard.set(color.rawValue, forKey: colorKey(for: style))
+    }
+
+    /// Continuous width, as a multiple of the base stroke. Clamped to the
+    /// slider's range so hand-edited or stale values stay usable.
+    static func lineWidth(for style: FreehandStyle) -> CGFloat {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: widthKey(for: style)) != nil else {
+            return FreehandGeometry.defaultMultiplier
+        }
+        let value = CGFloat(defaults.double(forKey: widthKey(for: style)))
+        return min(
+            max(value, FreehandGeometry.minimumMultiplier),
+            FreehandGeometry.maximumMultiplier
+        )
+    }
+
+    static func setLineWidth(_ width: CGFloat, for style: FreehandStyle) {
+        UserDefaults.standard.set(Double(width), forKey: widthKey(for: style))
     }
 }
 
@@ -317,18 +364,21 @@ enum ArrowGeometry {
     }
 }
 
-enum HighlightGeometry {
-    /// Continuous marker-width range, as multiples of the base stroke. The
-    /// narrow end is twice the old thinnest preset and the wide end is three
-    /// times the old thickest, so the slider reaches well past the presets.
+enum FreehandGeometry {
+    /// Continuous width range, as multiples of the base stroke. Both freehand
+    /// tools use it; the base stroke itself differs per style.
     static let minimumMultiplier: CGFloat = 1.2
     static let maximumMultiplier: CGFloat = 7.8
     static let defaultMultiplier: CGFloat = 1.7
 
-    /// Marker strokes are deliberately chunkier than arrow strokes, which use
-    /// the same multipliers on a much thinner base.
-    static func lineWidth(forImageSize size: CGSize, multiplier: CGFloat) -> CGFloat {
-        let base = max(8, min(size.width, size.height) * 0.012)
+    /// The marker's base is deliberately chunkier than the pencil's, so a
+    /// marker stays broad and a pencil stays fine at the same multiplier.
+    static func lineWidth(
+        forImageSize size: CGSize,
+        style: FreehandStyle,
+        multiplier: CGFloat
+    ) -> CGFloat {
+        let base = max(style.baseMinimum, min(size.width, size.height) * style.baseScale)
         return base * multiplier
     }
 
@@ -401,6 +451,10 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         symbolName: "camera.filters",
         toolTip: "Blur tool: drag over an area to blur it. Click again to stop drawing."
     )
+    private let pencilButton = ToolStripButton(
+        symbolName: "pencil.and.scribble",
+        toolTip: "Pencil tool: drag to draw a solid freehand line. Click again to stop drawing."
+    )
     private let highlightButton = ToolStripButton(
         symbolName: "highlighter",
         toolTip: "Highlight tool: drag to draw a translucent marker stroke. Click again to stop drawing."
@@ -436,12 +490,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         configureCanvas()
 
         canvas.setTool(nil)
-        pointerButton.setActive(true)
-        arrowButton.setActive(false)
-        squareButton.setActive(false)
-        blurButton.setActive(false)
-        highlightButton.setActive(false)
-        textButton.setActive(false)
+        updateToolButtons(active: nil)
     }
 
     // MARK: Setup
@@ -479,12 +528,17 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         blurButton.action = #selector(toggleBlurTool(_:))
         toolStrip.addSubview(blurButton)
 
-        highlightButton.frame = NSRect(x: 282, y: 8, width: 40, height: 32)
+        pencilButton.frame = NSRect(x: 282, y: 8, width: 40, height: 32)
+        pencilButton.target = self
+        pencilButton.action = #selector(togglePencilTool(_:))
+        toolStrip.addSubview(pencilButton)
+
+        highlightButton.frame = NSRect(x: 326, y: 8, width: 40, height: 32)
         highlightButton.target = self
         highlightButton.action = #selector(toggleHighlightTool(_:))
         toolStrip.addSubview(highlightButton)
 
-        textButton.frame = NSRect(x: 326, y: 8, width: 40, height: 32)
+        textButton.frame = NSRect(x: 370, y: 8, width: 40, height: 32)
         textButton.target = self
         textButton.action = #selector(toggleTextTool(_:))
         toolStrip.addSubview(textButton)
@@ -552,6 +606,10 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         toggleTool(.blur)
     }
 
+    @objc private func togglePencilTool(_ sender: Any?) {
+        toggleTool(.pencil)
+    }
+
     @objc private func toggleHighlightTool(_ sender: Any?) {
         toggleTool(.highlight)
     }
@@ -570,24 +628,14 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
 
     @objc private func selectPointerTool(_ sender: Any?) {
         canvas.setTool(nil)
-        pointerButton.setActive(true)
-        arrowButton.setActive(false)
-        squareButton.setActive(false)
-        blurButton.setActive(false)
-        highlightButton.setActive(false)
-        textButton.setActive(false)
+        updateToolButtons(active: nil)
         makeFirstResponder(canvas)
     }
 
     private func toggleTool(_ tool: AnnotationTool) {
         if canvas.activeTool == tool {
             canvas.setTool(nil)
-            pointerButton.setActive(true)
-            arrowButton.setActive(false)
-            squareButton.setActive(false)
-            blurButton.setActive(false)
-            highlightButton.setActive(false)
-            textButton.setActive(false)
+            updateToolButtons(active: nil)
         } else {
             selectTool(tool)
         }
@@ -596,10 +644,17 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
 
     private func selectTool(_ tool: AnnotationTool) {
         canvas.setTool(tool)
-        pointerButton.setActive(false)
+        updateToolButtons(active: tool)
+    }
+
+    /// Highlights the toolstrip button for the active tool, or the pointer
+    /// button when no tool is active.
+    private func updateToolButtons(active tool: AnnotationTool?) {
+        pointerButton.setActive(tool == nil)
         arrowButton.setActive(tool == .arrow)
         squareButton.setActive(tool == .square)
         blurButton.setActive(tool == .blur)
+        pencilButton.setActive(tool == .pencil)
         highlightButton.setActive(tool == .highlight)
         textButton.setActive(tool == .text)
     }
@@ -1118,6 +1173,7 @@ private final class ArrowOptionsPanel: NSView {
     enum Mode {
         case arrow
         case square
+        case pencil
         case highlight
         case text
     }
@@ -1143,6 +1199,7 @@ private final class ArrowOptionsPanel: NSView {
     var onStrokeWidthEditBegan: (@MainActor () -> Void)?
     var onStrokeWidthEditEnded: (@MainActor () -> Void)?
     var onHighlightColorSelected: (@MainActor (ArrowColor) -> Void)?
+    var onPencilColorSelected: (@MainActor (ArrowColor) -> Void)?
     var onTextColorSelected: (@MainActor (ArrowColor) -> Void)?
     var onBackgroundSelected: (@MainActor (TextBackground) -> Void)?
     var onTextSizeChanged: (@MainActor (Bool) -> Void)?
@@ -1163,9 +1220,12 @@ private final class ArrowOptionsPanel: NSView {
     private var isAdjustingWidth = false
     private var isRounded = SquarePreferences.isRounded
     private var fill = SquarePreferences.fill
+    private var arrowColor = ArrowPreferences.color
     private var arrowWidth = ArrowPreferences.lineWidth
-    private var highlightColor = HighlightPreferences.color
-    private var highlightWidth = HighlightPreferences.lineWidth
+    private var pencilColor = FreehandPreferences.color(for: .pencil)
+    private var pencilWidth = FreehandPreferences.lineWidth(for: .pencil)
+    private var highlightColor = FreehandPreferences.color(for: .highlight)
+    private var highlightWidth = FreehandPreferences.lineWidth(for: .highlight)
     private var textColor = TextPreferences.color
     private var textBackground = TextPreferences.background
 
@@ -1193,22 +1253,47 @@ private final class ArrowOptionsPanel: NSView {
         guard self.mode != mode else { return }
         self.mode = mode
         syncSliderToMode()
+        syncSwatchSelection()
         layoutControls()
         needsDisplay = true
     }
 
+    /// Points the colour swatches at the colour belonging to the current mode.
+    /// The swatch state is otherwise only touched by the mode that owns it, so
+    /// switching tools always shows the right selection.
+    private func syncSwatchSelection() {
+        let color: ArrowColor
+        switch mode {
+        case .text:
+            color = textColor
+        case .pencil:
+            color = pencilColor
+        case .highlight:
+            color = highlightColor
+        case .arrow, .square:
+            color = arrowColor
+        }
+        for button in swatchButtons {
+            button.setSelected(button.tag == color.rawValue)
+        }
+    }
+
     /// Points the shared slider at the active tool's own range and value. Arrows
-    /// and squares share one range; the highlight marker keeps a wider, chunkier
-    /// one of its own.
+    /// and squares share one range; each freehand tool keeps its own width on a
+    /// base of its own, so the pencil and the marker stay distinct.
     private func syncSliderToMode() {
         switch mode {
         case .arrow, .square:
             widthSlider.minValue = Double(ArrowGeometry.minimumMultiplier)
             widthSlider.maxValue = Double(ArrowGeometry.maximumMultiplier)
             widthSlider.doubleValue = Double(arrowWidth)
+        case .pencil:
+            widthSlider.minValue = Double(FreehandGeometry.minimumMultiplier)
+            widthSlider.maxValue = Double(FreehandGeometry.maximumMultiplier)
+            widthSlider.doubleValue = Double(pencilWidth)
         case .highlight:
-            widthSlider.minValue = Double(HighlightGeometry.minimumMultiplier)
-            widthSlider.maxValue = Double(HighlightGeometry.maximumMultiplier)
+            widthSlider.minValue = Double(FreehandGeometry.minimumMultiplier)
+            widthSlider.maxValue = Double(FreehandGeometry.maximumMultiplier)
             widthSlider.doubleValue = Double(highlightWidth)
         case .text:
             break
@@ -1280,6 +1365,7 @@ private final class ArrowOptionsPanel: NSView {
         addSubview(sizeIncreaseButton)
 
         updateSquareSelection(isRounded: isRounded, fill: fill)
+        updatePencilSelection(color: pencilColor, width: pencilWidth)
         updateHighlightSelection(color: highlightColor, width: highlightWidth)
         updateTextSelection(color: textColor, background: textBackground)
         layoutControls()
@@ -1287,10 +1373,11 @@ private final class ArrowOptionsPanel: NSView {
 
     /// Lays out the controls for the current mode and resizes the panel to fit.
     /// Arrow and square modes show color and a stroke-width slider; square mode
-    /// adds the corners and fill levels; the highlight mode shows its own colour
+    /// adds the corners and fill levels; the freehand modes show their own colour
     /// swatches and slider; text mode shows text color, background, and size.
     private func layoutControls() {
-        let showsWidthSlider = mode == .arrow || mode == .square || mode == .highlight
+        let showsWidthSlider = mode == .arrow || mode == .square
+            || mode == .pencil || mode == .highlight
         let showsSquareControls = mode == .square
         let showsTextControls = mode == .text
 
@@ -1407,14 +1494,15 @@ private final class ArrowOptionsPanel: NSView {
         frame = NSRect(origin: frame.origin, size: NSSize(width: width, height: Self.panelHeight))
     }
 
-    /// Arrow and square mode: highlights the chosen colour and points the shared
+    /// Arrow and square mode: strokes the chosen colour and points the shared
     /// slider at the chosen width.
     func updateSelection(color: ArrowColor, width: CGFloat) {
+        arrowColor = color
         arrowWidth = width
-        for button in swatchButtons {
-            button.setSelected(button.tag == color.rawValue)
-        }
         if mode == .arrow || mode == .square {
+            for button in swatchButtons {
+                button.setSelected(button.tag == color.rawValue)
+            }
             widthSlider.doubleValue = Double(width)
         }
     }
@@ -1428,13 +1516,24 @@ private final class ArrowOptionsPanel: NSView {
         }
     }
 
+    func updatePencilSelection(color: ArrowColor, width: CGFloat) {
+        pencilColor = color
+        pencilWidth = width
+        if mode == .pencil {
+            for button in swatchButtons {
+                button.setSelected(button.tag == color.rawValue)
+            }
+            widthSlider.doubleValue = Double(width)
+        }
+    }
+
     func updateHighlightSelection(color: ArrowColor, width: CGFloat) {
         highlightColor = color
         highlightWidth = width
-        for button in swatchButtons {
-            button.setSelected(button.tag == color.rawValue)
-        }
         if mode == .highlight {
+            for button in swatchButtons {
+                button.setSelected(button.tag == color.rawValue)
+            }
             widthSlider.doubleValue = Double(width)
         }
     }
@@ -1442,6 +1541,7 @@ private final class ArrowOptionsPanel: NSView {
     func updateTextSelection(color: ArrowColor, background: TextBackground) {
         textColor = color
         textBackground = background
+        guard mode == .text else { return }
         for button in swatchButtons {
             button.setSelected(button.tag == color.rawValue)
         }
@@ -1469,6 +1569,9 @@ private final class ArrowOptionsPanel: NSView {
         if mode == .text {
             updateTextSelection(color: color, background: textBackground)
             onTextColorSelected?(color)
+        } else if mode == .pencil {
+            updatePencilSelection(color: color, width: pencilWidth)
+            onPencilColorSelected?(color)
         } else if mode == .highlight {
             updateHighlightSelection(color: color, width: highlightWidth)
             onHighlightColorSelected?(color)
@@ -1492,6 +1595,8 @@ private final class ArrowOptionsPanel: NSView {
         switch mode {
         case .arrow, .square:
             arrowWidth = width
+        case .pencil:
+            pencilWidth = width
         case .highlight:
             highlightWidth = width
         case .text:
@@ -1505,12 +1610,6 @@ private final class ArrowOptionsPanel: NSView {
             onStrokeWidthChanged?(width)
             onStrokeWidthEditEnded?()
         }
-    }
-
-    private func currentColorFromButtons() -> ArrowColor {
-        guard let tag = swatchButtons.first(where: { $0.isSelected })?.tag,
-              let color = ArrowColor(rawValue: tag) else { return .red }
-        return color
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -1567,13 +1666,16 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         var rect: CGRect
     }
 
-    /// A freehand highlighter stroke. `points` are in image units; the marker
-    /// width comes from `thickness` (a multiple of the base stroke) at draw
-    /// and export time.
-    private struct Highlight: Equatable {
+    /// A freehand stroke drawn with the pencil or the marker. `points` are in
+    /// image units; the width comes from `thickness` (a multiple of the base
+    /// stroke for `style`), and `alpha` is captured per stroke so a pencil and a
+    /// marker can be mixed in one image.
+    private struct FreehandStroke: Equatable {
         var points: [CGPoint]
         var color: ArrowColor
         var thickness: CGFloat
+        var alpha: CGFloat
+        var style: FreehandStyle
     }
 
     /// A text annotation. `origin` is the top-left of the text in image units;
@@ -1591,7 +1693,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         var arrows: [Arrow]
         var squares: [Square]
         var blurRegions: [BlurRegion]
-        var highlights: [Highlight]
+        var strokes: [FreehandStroke]
         var textNotes: [TextNote]
     }
 
@@ -1599,7 +1701,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case arrow(Int)
         case square(Int)
         case blur(Int)
-        case highlight(Int)
+        case stroke(Int)
         case text(Int)
     }
 
@@ -1614,11 +1716,11 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case drawingArrow(start: CGPoint)
         case drawingSquare(start: CGPoint)
         case drawingBlur(start: CGPoint)
-        case drawingHighlight
+        case drawingStroke
         case moving(index: Int, original: Arrow, grabOffset: CGPoint)
         case movingSquare(index: Int, original: Square, grabOffset: CGPoint)
         case movingBlur(index: Int, original: BlurRegion, grabOffset: CGPoint)
-        case movingHighlight(index: Int, original: Highlight, grabOffset: CGPoint)
+        case movingStroke(index: Int, original: FreehandStroke, grabOffset: CGPoint)
         case resizingStart(index: Int)
         case resizingEnd(index: Int)
         case resizingSquare(index: Int, original: CGRect, corner: SquareCorner)
@@ -1634,7 +1736,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case squareBody(Int)
         case blurCorner(Int, SquareCorner)
         case blurBody(Int)
-        case highlightBody(Int)
+        case strokeBody(Int)
         case textBody(Int)
     }
 
@@ -1647,19 +1749,21 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var arrows: [Arrow] = []
     private var squares: [Square] = []
     private var blurRegions: [BlurRegion] = []
-    private var highlights: [Highlight] = []
+    private var strokes: [FreehandStroke] = []
     private var textNotes: [TextNote] = []
     private var selection: Selection?
     private var dragMode: DragMode?
     private var pointerPosition: CGPoint?
-    private var drawingHighlightPoints: [CGPoint] = []
+    private var drawingStrokePoints: [CGPoint] = []
     private var strokeWidthUndoSnapshot: AnnotationSnapshot?
     private var currentColor = ArrowPreferences.color
     private var currentThickness = ArrowPreferences.lineWidth
     private var currentRounded = SquarePreferences.isRounded
     private var currentFill = SquarePreferences.fill
-    private var currentHighlightColor = HighlightPreferences.color
-    private var currentHighlightWidth = HighlightPreferences.lineWidth
+    private var currentPencilColor = FreehandPreferences.color(for: .pencil)
+    private var currentPencilWidth = FreehandPreferences.lineWidth(for: .pencil)
+    private var currentHighlightColor = FreehandPreferences.color(for: .highlight)
+    private var currentHighlightWidth = FreehandPreferences.lineWidth(for: .highlight)
     private var currentTextColor = TextPreferences.color
     private var currentTextBackground = TextPreferences.background
     private var currentTextScale = TextPreferences.scale
@@ -1715,7 +1819,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             self?.endStrokeWidthEdit()
         }
         optionsPanel.onHighlightColorSelected = { [weak self] color in
-            self?.applyHighlightColor(color)
+            self?.applyFreehandColor(color, style: .highlight)
+        }
+        optionsPanel.onPencilColorSelected = { [weak self] color in
+            self?.applyFreehandColor(color, style: .pencil)
         }
         optionsPanel.onTextColorSelected = { [weak self] color in
             self?.applyTextColor(color)
@@ -1728,6 +1835,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         }
         optionsPanel.updateSelection(color: currentColor, width: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        optionsPanel.updatePencilSelection(color: currentPencilColor, width: currentPencilWidth)
         optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
         addSubview(optionsPanel)
@@ -1753,25 +1861,28 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         currentThickness = ArrowPreferences.lineWidth
         currentRounded = SquarePreferences.isRounded
         currentFill = SquarePreferences.fill
-        currentHighlightColor = HighlightPreferences.color
-        currentHighlightWidth = HighlightPreferences.lineWidth
+        currentPencilColor = FreehandPreferences.color(for: .pencil)
+        currentPencilWidth = FreehandPreferences.lineWidth(for: .pencil)
+        currentHighlightColor = FreehandPreferences.color(for: .highlight)
+        currentHighlightWidth = FreehandPreferences.lineWidth(for: .highlight)
         currentTextColor = TextPreferences.color
         currentTextBackground = TextPreferences.background
         currentTextScale = TextPreferences.scale
         arrows.removeAll()
         squares.removeAll()
         blurRegions.removeAll()
-        highlights.removeAll()
+        strokes.removeAll()
         textNotes.removeAll()
         blurredScreenshot = nil
         blurredScreenshotImage = nil
         selection = nil
         dragMode = nil
         pointerPosition = nil
-        drawingHighlightPoints = []
+        drawingStrokePoints = []
         hasCamera = false
         optionsPanel.updateSelection(color: currentColor, width: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        optionsPanel.updatePencilSelection(color: currentPencilColor, width: currentPencilWidth)
         optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
         updateOptionsVisibility(animated: false)
@@ -1784,7 +1895,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             arrows: arrows,
             squares: squares,
             blurRegions: blurRegions,
-            highlights: highlights,
+            strokes: strokes,
             textNotes: textNotes
         )
     }
@@ -1796,15 +1907,16 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         arrows = snapshot.arrows
         squares = snapshot.squares
         blurRegions = snapshot.blurRegions
-        highlights = snapshot.highlights
+        strokes = snapshot.strokes
         textNotes = snapshot.textNotes
         selection = nil
         dragMode = nil
-        drawingHighlightPoints = []
+        drawingStrokePoints = []
         blurredScreenshot = nil
         blurredScreenshotImage = nil
         optionsPanel.updateSelection(color: currentColor, width: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        optionsPanel.updatePencilSelection(color: currentPencilColor, width: currentPencilWidth)
         optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
         updateOptionsVisibility()
@@ -1840,13 +1952,14 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         activeTool = tool
         dragMode = nil
         pointerPosition = nil
-        drawingHighlightPoints = []
+        drawingStrokePoints = []
         selection = nil
         if tool == .blur {
             ensureBlurredScreenshot()
         }
         optionsPanel.updateSelection(color: currentColor, width: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        optionsPanel.updatePencilSelection(color: currentPencilColor, width: currentPencilWidth)
         optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
         updateOptionsVisibility()
@@ -1905,17 +2018,20 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             drawBlur(BlurRegion(rect: normalizedRect(from: start, to: pointerPosition)))
         }
 
-        // Highlighter strokes tint the content but stay below the sharper
+        // Freehand strokes tint the content but stay below the sharper
         // annotations, so squares and arrows remain easy to read and select.
-        for highlight in highlights {
-            drawHighlight(highlight, imageSize: imageSize, scale: scale)
+        for stroke in strokes {
+            drawStroke(stroke, imageSize: imageSize, scale: scale)
         }
-        if case .drawingHighlight? = dragMode {
-            drawHighlight(
-                Highlight(
-                    points: drawingHighlightPoints,
-                    color: currentHighlightColor,
-                    thickness: currentHighlightWidth
+        if case .drawingStroke? = dragMode {
+            let style = drawingStyle
+            drawStroke(
+                FreehandStroke(
+                    points: drawingStrokePoints,
+                    color: freehandColor(for: style),
+                    thickness: freehandWidth(for: style),
+                    alpha: style.alpha,
+                    style: style
                 ),
                 imageSize: imageSize,
                 scale: scale
@@ -1987,8 +2103,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             drawHandles(for: arrows[index])
         } else if case .blur(let index)? = selection, blurRegions.indices.contains(index) {
             drawHandles(for: blurRegions[index])
-        } else if case .highlight(let index)? = selection, highlights.indices.contains(index) {
-            drawHandles(for: highlights[index])
+        } else if case .stroke(let index)? = selection, strokes.indices.contains(index) {
+            drawHandles(for: strokes[index])
         } else if case .text(let index)? = selection, textNotes.indices.contains(index),
                   index != editingTextIndex {
             drawHandles(for: textNotes[index])
@@ -2062,18 +2178,39 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         NSGraphicsContext.restoreGraphicsState()
     }
 
-    private func drawHighlight(_ highlight: Highlight, imageSize: CGSize, scale: CGFloat) {
-        guard highlight.points.count >= 2 else { return }
-        let lineWidth = HighlightGeometry.lineWidth(
+    /// The freehand style the active tool draws with. Freehand previews and
+    /// newly created strokes both read their base width and opacity here.
+    private var drawingStyle: FreehandStyle {
+        activeTool == .pencil ? .pencil : .highlight
+    }
+
+    private func freehandColor(for style: FreehandStyle) -> ArrowColor {
+        switch style {
+        case .pencil: currentPencilColor
+        case .highlight: currentHighlightColor
+        }
+    }
+
+    private func freehandWidth(for style: FreehandStyle) -> CGFloat {
+        switch style {
+        case .pencil: currentPencilWidth
+        case .highlight: currentHighlightWidth
+        }
+    }
+
+    private func drawStroke(_ stroke: FreehandStroke, imageSize: CGSize, scale: CGFloat) {
+        guard stroke.points.count >= 2 else { return }
+        let lineWidth = FreehandGeometry.lineWidth(
             forImageSize: imageSize,
-            multiplier: highlight.thickness
+            style: stroke.style,
+            multiplier: stroke.thickness
         ) * scale
-        let path = HighlightGeometry.path(
-            points: highlight.points,
+        let path = FreehandGeometry.path(
+            points: stroke.points,
             transform: { self.contentToView($0) }
         )
         path.lineWidth = lineWidth
-        highlight.color.nsColor.withAlphaComponent(HighlightPreferences.alpha).setStroke()
+        stroke.color.nsColor.withAlphaComponent(stroke.alpha).setStroke()
         path.stroke()
     }
 
@@ -2131,16 +2268,16 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         )
     }
 
-    /// Adds a sample to the in-progress marker stroke, dropping points that are
-    /// too close together so the path stays light and smooth.
-    private func appendHighlightPoint(_ point: CGPoint) {
-        guard let last = drawingHighlightPoints.last else {
-            drawingHighlightPoints = [point]
+    /// Adds a sample to the in-progress freehand stroke, dropping points that
+    /// are too close together so the path stays light and smooth.
+    private func appendStrokePoint(_ point: CGPoint) {
+        guard let last = drawingStrokePoints.last else {
+            drawingStrokePoints = [point]
             return
         }
         let threshold = max(1, 1.5 / cameraScale)
         guard distance(from: point, to: last) >= threshold else { return }
-        drawingHighlightPoints.append(point)
+        drawingStrokePoints.append(point)
     }
 
     private func polylineLength(_ points: [CGPoint]) -> CGFloat {
@@ -2256,10 +2393,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         outline.stroke()
     }
 
-    private func drawHandles(for highlight: Highlight) {
+    private func drawHandles(for stroke: FreehandStroke) {
         guard let screenshot else { return }
         let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
-        let rect = viewRect(for: highlightBounds(for: highlight, imageSize: imageSize))
+        let rect = viewRect(for: strokeBounds(for: stroke, imageSize: imageSize))
         let outline = NSBezierPath(rect: rect.insetBy(dx: -2, dy: -2))
         outline.setLineDash([4, 3], count: 2, phase: 0)
         NSColor.controlAccentColor.withAlphaComponent(0.9).setStroke()
@@ -2267,22 +2404,23 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         outline.stroke()
     }
 
-    /// Bounding box of a marker stroke including its width, in image units.
-    private func highlightBounds(for highlight: Highlight, imageSize: CGSize) -> CGRect {
-        guard let first = highlight.points.first else { return .zero }
+    /// Bounding box of a freehand stroke including its width, in image units.
+    private func strokeBounds(for stroke: FreehandStroke, imageSize: CGSize) -> CGRect {
+        guard let first = stroke.points.first else { return .zero }
         var minX = first.x
         var maxX = first.x
         var minY = first.y
         var maxY = first.y
-        for point in highlight.points {
+        for point in stroke.points {
             minX = min(minX, point.x)
             maxX = max(maxX, point.x)
             minY = min(minY, point.y)
             maxY = max(maxY, point.y)
         }
-        let lineWidth = HighlightGeometry.lineWidth(
+        let lineWidth = FreehandGeometry.lineWidth(
             forImageSize: imageSize,
-            multiplier: highlight.thickness
+            style: stroke.style,
+            multiplier: stroke.thickness
         )
         let padding = lineWidth / 2 + 1
         return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
@@ -2671,13 +2809,13 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                         y: contentPoint.y - region.rect.minY
                     )
                 )
-            case .highlightBody(let index):
-                guard let first = highlights[index].points.first else { break }
-                let highlight = highlights[index]
-                selectHighlight(at: index)
-                dragMode = .movingHighlight(
+            case .strokeBody(let index):
+                guard let first = strokes[index].points.first else { break }
+                let stroke = strokes[index]
+                selectStroke(at: index)
+                dragMode = .movingStroke(
                     index: index,
-                    original: highlight,
+                    original: stroke,
                     grabOffset: CGPoint(
                         x: contentPoint.x - first.x,
                         y: contentPoint.y - first.y
@@ -2703,6 +2841,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             selection = nil
             optionsPanel.updateSelection(color: currentColor, width: currentThickness)
             optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+            optionsPanel.updatePencilSelection(color: currentPencilColor, width: currentPencilWidth)
             optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
             optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
             updateOptionsVisibility()
@@ -2716,9 +2855,9 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             case .some(.blur):
                 dragMode = .drawingBlur(start: contentPoint)
                 pointerPosition = contentPoint
-            case .some(.highlight):
-                dragMode = .drawingHighlight
-                drawingHighlightPoints = [contentPoint]
+            case .some(.pencil), .some(.highlight):
+                dragMode = .drawingStroke
+                drawingStrokePoints = [contentPoint]
                 pointerPosition = contentPoint
             case .some(.text):
                 dragMode = nil
@@ -2740,8 +2879,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         switch mode {
         case .drawingArrow, .drawingSquare, .drawingBlur:
             pointerPosition = point
-        case .drawingHighlight:
-            appendHighlightPoint(point)
+        case .drawingStroke:
+            appendStrokePoint(point)
             pointerPosition = point
         case let .moving(index, original, grabOffset):
             let proposedStart = CGPoint(
@@ -2787,8 +2926,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             dy = min(max(dy, limits.minY - original.rect.minY), limits.maxY - original.rect.maxY)
 
             blurRegions[index].rect = original.rect.offsetBy(dx: dx, dy: dy)
-        case let .movingHighlight(index, original, grabOffset):
-            guard highlights.indices.contains(index), let first = original.points.first else { break }
+        case let .movingStroke(index, original, grabOffset):
+            guard strokes.indices.contains(index), let first = original.points.first else { break }
             let proposedOrigin = CGPoint(
                 x: point.x - grabOffset.x,
                 y: point.y - grabOffset.y
@@ -2797,14 +2936,14 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             var dy = proposedOrigin.y - first.y
 
             let limits = visibleContentRect
-            let bounds = highlightBounds(
+            let bounds = strokeBounds(
                 for: original,
                 imageSize: CGSize(width: screenshot?.width ?? 0, height: screenshot?.height ?? 0)
             )
             dx = min(max(dx, limits.minX - bounds.minX), limits.maxX - bounds.maxX)
             dy = min(max(dy, limits.minY - bounds.minY), limits.maxY - bounds.maxY)
 
-            highlights[index].points = original.points.map {
+            strokes[index].points = original.points.map {
                 CGPoint(x: $0.x + dx, y: $0.y + dy)
             }
         case .resizingStart(let index):
@@ -2897,16 +3036,19 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                     selection = nil
                 }
             }
-        case .drawingHighlight:
-            if drawingHighlightPoints.count >= 2,
-               polylineLength(drawingHighlightPoints) * cameraScale >= minimumDragDistance {
-                highlights.append(Highlight(
-                    points: drawingHighlightPoints,
-                    color: currentHighlightColor,
-                    thickness: currentHighlightWidth
+        case .drawingStroke:
+            if drawingStrokePoints.count >= 2,
+               polylineLength(drawingStrokePoints) * cameraScale >= minimumDragDistance {
+                let style = drawingStyle
+                strokes.append(FreehandStroke(
+                    points: drawingStrokePoints,
+                    color: freehandColor(for: style),
+                    thickness: freehandWidth(for: style),
+                    alpha: style.alpha,
+                    style: style
                 ))
                 createdAnnotation = true
-                selection = .highlight(highlights.count - 1)
+                selection = .stroke(strokes.count - 1)
                 updateOptionsVisibility()
             } else {
                 selection = nil
@@ -2916,7 +3058,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         }
 
         pointerPosition = nil
-        drawingHighlightPoints = []
+        drawingStrokePoints = []
         if (createdAnnotation || didDragAnnotation), let dragUndoSnapshot {
             let actionName = createdAnnotation ? "Add Annotation" : "Edit Annotation"
             registerAnnotationUndo(restoring: dragUndoSnapshot, actionName: actionName)
@@ -3067,16 +3209,26 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         updateOptionsVisibility()
     }
 
-    private func selectHighlight(at index: Int) {
-        guard highlights.indices.contains(index) else { return }
-        selection = .highlight(index)
-        let highlight = highlights[index]
-        currentHighlightColor = highlight.color
-        currentHighlightWidth = highlight.thickness
-        optionsPanel.updateHighlightSelection(
-            color: currentHighlightColor,
-            width: currentHighlightWidth
-        )
+    private func selectStroke(at index: Int) {
+        guard strokes.indices.contains(index) else { return }
+        selection = .stroke(index)
+        let stroke = strokes[index]
+        switch stroke.style {
+        case .pencil:
+            currentPencilColor = stroke.color
+            currentPencilWidth = stroke.thickness
+            optionsPanel.updatePencilSelection(
+                color: currentPencilColor,
+                width: currentPencilWidth
+            )
+        case .highlight:
+            currentHighlightColor = stroke.color
+            currentHighlightWidth = stroke.thickness
+            optionsPanel.updateHighlightSelection(
+                color: currentHighlightColor,
+                width: currentHighlightWidth
+            )
+        }
         updateOptionsVisibility()
     }
 
@@ -3135,16 +3287,33 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         window?.makeFirstResponder(self)
     }
 
-    private func applyHighlightColor(_ color: ArrowColor) {
+    /// Applies a colour to the active freehand tool and to the selected stroke,
+    /// if it belongs to that tool. The two freehand tools keep separate colours.
+    private func applyFreehandColor(_ color: ArrowColor, style: FreehandStyle) {
         let before = annotationSnapshot()
         var changedAnnotation = false
-        currentHighlightColor = color
-        HighlightPreferences.color = color
-        if case .highlight(let index)? = selection, highlights.indices.contains(index) {
-            highlights[index].color = color
-            changedAnnotation = true
+        switch style {
+        case .pencil:
+            currentPencilColor = color
+            FreehandPreferences.setColor(color, for: .pencil)
+            if case .stroke(let index)? = selection, strokes.indices.contains(index),
+               strokes[index].style == .pencil {
+                strokes[index].color = color
+                changedAnnotation = true
+            }
+        case .highlight:
+            currentHighlightColor = color
+            FreehandPreferences.setColor(color, for: .highlight)
+            if case .stroke(let index)? = selection, strokes.indices.contains(index),
+               strokes[index].style == .highlight {
+                strokes[index].color = color
+                changedAnnotation = true
+            }
         }
-        if changedAnnotation { registerAnnotationUndo(restoring: before, actionName: "Change Highlight Color") }
+        if changedAnnotation {
+            let name = style == .pencil ? "Change Pencil Color" : "Change Highlight Color"
+            registerAnnotationUndo(restoring: before, actionName: name)
+        }
         needsDisplay = true
         window?.makeFirstResponder(self)
     }
@@ -3159,10 +3328,17 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     /// The slider is shared, so the width is routed by the panel's current mode.
     private func applyStrokeWidth(_ width: CGFloat) {
         switch optionsMode {
+        case .pencil?:
+            currentPencilWidth = width
+            if case .stroke(let index)? = selection, strokes.indices.contains(index),
+               strokes[index].style == .pencil {
+                strokes[index].thickness = width
+            }
         case .highlight?:
             currentHighlightWidth = width
-            if case .highlight(let index)? = selection, highlights.indices.contains(index) {
-                highlights[index].thickness = width
+            if case .stroke(let index)? = selection, strokes.indices.contains(index),
+               strokes[index].style == .highlight {
+                strokes[index].thickness = width
             }
         case .arrow?, .square?:
             currentThickness = width
@@ -3180,8 +3356,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     /// Persists the width and registers a single undo step for the drag.
     private func endStrokeWidthEdit() {
         switch optionsMode {
+        case .pencil?:
+            FreehandPreferences.setLineWidth(currentPencilWidth, for: .pencil)
         case .highlight?:
-            HighlightPreferences.lineWidth = currentHighlightWidth
+            FreehandPreferences.setLineWidth(currentHighlightWidth, for: .highlight)
         case .arrow?, .square?:
             ArrowPreferences.lineWidth = currentThickness
         default:
@@ -3259,6 +3437,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             return .square
         case .some(.blur):
             return nil
+        case .some(.pencil):
+            return .pencil
         case .some(.highlight):
             return .highlight
         case .some(.text):
@@ -3269,8 +3449,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 return .arrow
             case .some(.square):
                 return .square
-            case .some(.highlight):
-                return .highlight
+            case .some(.stroke(let index)) where strokes.indices.contains(index):
+                return strokes[index].style == .pencil ? .pencil : .highlight
             case .some(.text):
                 return .text
             default:
@@ -3337,9 +3517,9 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case .blur(let index):
             guard blurRegions.indices.contains(index) else { return false }
             blurRegions.remove(at: index)
-        case .highlight(let index):
-            guard highlights.indices.contains(index) else { return false }
-            highlights.remove(at: index)
+        case .stroke(let index):
+            guard strokes.indices.contains(index) else { return false }
+            strokes.remove(at: index)
         case .text(let index):
             guard textNotes.indices.contains(index) else { return false }
             textNotes.remove(at: index)
@@ -3348,6 +3528,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         self.selection = nil
         optionsPanel.updateSelection(color: currentColor, width: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        optionsPanel.updatePencilSelection(color: currentPencilColor, width: currentPencilWidth)
         optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
         updateOptionsVisibility()
         needsDisplay = true
@@ -3491,20 +3672,21 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             }
         }
 
-        // Highlighter strokes sit between the squares and the blur regions, so
+        // Freehand strokes sit between the squares and the blur regions, so
         // they are hit-tested in that order.
-        for index in highlights.indices.reversed() {
-            let highlight = highlights[index]
-            guard highlight.points.count >= 2 else { continue }
-            let lineWidth = HighlightGeometry.lineWidth(
+        for index in strokes.indices.reversed() {
+            let stroke = strokes[index]
+            guard stroke.points.count >= 2 else { continue }
+            let lineWidth = FreehandGeometry.lineWidth(
                 forImageSize: imageSize,
-                multiplier: highlight.thickness
+                style: stroke.style,
+                multiplier: stroke.thickness
             )
             let tolerance = max(6, lineWidth * scale * 0.6)
-            let points = highlight.points.map { contentToView($0) }
+            let points = stroke.points.map { contentToView($0) }
             for position in 0..<(points.count - 1) {
                 if distance(from: point, toSegmentFrom: points[position], to: points[position + 1]) <= tolerance {
-                    return .highlightBody(index)
+                    return .strokeBody(index)
                 }
             }
         }
@@ -3569,8 +3751,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         for region in blurRegions {
             bounds = bounds.union(region.rect)
         }
-        for highlight in highlights {
-            bounds = bounds.union(highlightBounds(for: highlight, imageSize: imageSize))
+        for stroke in strokes {
+            bounds = bounds.union(strokeBounds(for: stroke, imageSize: imageSize))
         }
         for note in textNotes {
             bounds = bounds.union(textBounds(for: note))
@@ -3608,13 +3790,16 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 ))
             case .drawingBlur(let start)?:
                 bounds = bounds.union(normalizedRect(from: start, to: pointerPosition))
-            case .drawingHighlight?:
-                if drawingHighlightPoints.count >= 2 {
-                    bounds = bounds.union(highlightBounds(
-                        for: Highlight(
-                            points: drawingHighlightPoints,
-                            color: currentHighlightColor,
-                            thickness: currentHighlightWidth
+            case .drawingStroke?:
+                if drawingStrokePoints.count >= 2 {
+                    let style = drawingStyle
+                    bounds = bounds.union(strokeBounds(
+                        for: FreehandStroke(
+                            points: drawingStrokePoints,
+                            color: freehandColor(for: style),
+                            thickness: freehandWidth(for: style),
+                            alpha: style.alpha,
+                            style: style
                         ),
                         imageSize: imageSize
                     ))
@@ -3770,8 +3955,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         for region in blurRegions {
             exportBounds = exportBounds.union(region.rect)
         }
-        for highlight in highlights {
-            exportBounds = exportBounds.union(highlightBounds(for: highlight, imageSize: imageSize))
+        for stroke in strokes {
+            exportBounds = exportBounds.union(strokeBounds(for: stroke, imageSize: imageSize))
         }
         for note in textNotes {
             exportBounds = exportBounds.union(textBounds(for: note))
@@ -3821,23 +4006,24 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         context.setLineCap(.round)
         context.setLineJoin(.round)
 
-        // Highlighter strokes render below the squares and arrows, matching
-        // the editor. The alpha keeps the content underneath readable.
-        for highlight in highlights {
-            guard highlight.points.count >= 2 else { continue }
-            let lineWidth = HighlightGeometry.lineWidth(
+        // Freehand strokes render below the squares and arrows, matching the
+        // editor. Each stroke's alpha keeps the content underneath readable.
+        for stroke in strokes {
+            guard stroke.points.count >= 2 else { continue }
+            let lineWidth = FreehandGeometry.lineWidth(
                 forImageSize: imageSize,
-                multiplier: highlight.thickness
+                style: stroke.style,
+                multiplier: stroke.thickness
             )
-            let path = HighlightGeometry.path(
-                points: highlight.points,
+            let path = FreehandGeometry.path(
+                points: stroke.points,
                 transform: {
                     self.exportPoint($0, originX: originX, originY: originY, exportHeight: exportHeight)
                 }
             )
             context.setStrokeColor(
-                highlight.color.cgColor.copy(alpha: HighlightPreferences.alpha)
-                    ?? highlight.color.cgColor
+                stroke.color.cgColor.copy(alpha: stroke.alpha)
+                    ?? stroke.color.cgColor
             )
             context.setLineWidth(lineWidth)
             context.addPath(path.cgPath)
