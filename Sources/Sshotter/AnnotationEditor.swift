@@ -463,6 +463,10 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         symbolName: "character.cursor.ibeam",
         toolTip: "Text tool: click the canvas to add text. Drag text to move it; double-click to edit."
     )
+    private let cropButton = ToolStripButton(
+        symbolName: "crop",
+        toolTip: "Crop tool: drag to choose the area to keep, then press Return to crop."
+    )
 
     init(
         onCopy: @escaping @MainActor (NSImage) -> Void,
@@ -488,6 +492,15 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         contentView = container
         configureToolStrip()
         configureCanvas()
+
+        canvas.onCropSessionChanged = { [weak self] in
+            guard let self else { return }
+            if !self.canvas.isCropping {
+                // Applying or cancelling a crop returns to the Pointer tool.
+                self.canvas.setTool(nil)
+            }
+            self.updateToolButtons(active: self.canvas.activeTool)
+        }
 
         canvas.setTool(nil)
         updateToolButtons(active: nil)
@@ -542,6 +555,11 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         textButton.target = self
         textButton.action = #selector(toggleTextTool(_:))
         toolStrip.addSubview(textButton)
+
+        cropButton.frame = NSRect(x: 414, y: 8, width: 40, height: 32)
+        cropButton.target = self
+        cropButton.action = #selector(toggleCropTool(_:))
+        toolStrip.addSubview(cropButton)
 
         container.addSubview(toolStrip)
         NSLayoutConstraint.activate([
@@ -618,6 +636,15 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         toggleTool(.text)
     }
 
+    @objc private func toggleCropTool(_ sender: Any?) {
+        if canvas.isCropping {
+            canvas.cancelCropSession()
+        } else {
+            canvas.beginCropSession()
+        }
+        makeFirstResponder(canvas)
+    }
+
     @objc func undoAnnotation(_ sender: Any?) {
         canvas.undoAnnotationOrTextEdit(redo: false)
     }
@@ -648,15 +675,18 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
     }
 
     /// Highlights the toolstrip button for the active tool, or the pointer
-    /// button when no tool is active.
+    /// button when no tool is active. A crop session takes over the strip, so
+    /// the tool buttons stay dimmed until it ends.
     private func updateToolButtons(active tool: AnnotationTool?) {
-        pointerButton.setActive(tool == nil)
-        arrowButton.setActive(tool == .arrow)
-        squareButton.setActive(tool == .square)
-        blurButton.setActive(tool == .blur)
-        pencilButton.setActive(tool == .pencil)
-        highlightButton.setActive(tool == .highlight)
-        textButton.setActive(tool == .text)
+        let cropping = canvas.isCropping
+        pointerButton.setActive(tool == nil && !cropping)
+        arrowButton.setActive(tool == .arrow && !cropping)
+        squareButton.setActive(tool == .square && !cropping)
+        blurButton.setActive(tool == .blur && !cropping)
+        pencilButton.setActive(tool == .pencil && !cropping)
+        highlightButton.setActive(tool == .highlight && !cropping)
+        textButton.setActive(tool == .text && !cropping)
+        cropButton.setActive(cropping)
     }
 
     @objc func copyScreenshot(_ sender: Any?) {
@@ -1695,6 +1725,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         var blurRegions: [BlurRegion]
         var strokes: [FreehandStroke]
         var textNotes: [TextNote]
+        var cropRect: CGRect?
     }
 
     private enum Selection {
@@ -1710,6 +1741,34 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case topRight
         case bottomLeft
         case bottomRight
+    }
+
+    /// The eight grab points on the crop frame: four corners and four edges.
+    private enum CropHandle: CaseIterable {
+        case topLeft
+        case top
+        case topRight
+        case right
+        case bottomRight
+        case bottom
+        case bottomLeft
+        case left
+    }
+
+    /// A live crop-editing session. While one exists the canvas shows the whole
+    /// image with everything outside `rect` dimmed. Applying it stores `rect` as
+    /// the canvas's non-destructive crop; cancelling leaves the crop untouched.
+    private struct CropSession {
+        var rect: CGRect
+        var drag: CropDrag?
+        var originalRect: CGRect
+        var grabOffset: CGPoint
+    }
+
+    private enum CropDrag {
+        case move
+        case resize(CropHandle)
+        case create(start: CGPoint)
     }
 
     private enum DragMode {
@@ -1746,6 +1805,9 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     private var screenshot: CGImage?
     private var screenshotImage: NSImage?
+    /// Non-destructive crop frame in image units. `nil` means the whole image.
+    private var cropRect: CGRect?
+    private var cropSession: CropSession?
     private var arrows: [Arrow] = []
     private var squares: [Square] = []
     private var blurRegions: [BlurRegion] = []
@@ -1790,6 +1852,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var hasCamera = false
     private let minimumCameraScale: CGFloat = 0.02
     private let maximumCameraScale: CGFloat = 4
+
+    /// Fires when a crop session starts or ends, so the window can refresh its
+    /// tool-strip buttons.
+    var onCropSessionChanged: (@MainActor () -> Void)?
 
     private(set) var activeTool: AnnotationTool? = .arrow
 
@@ -1876,6 +1942,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         blurredScreenshot = nil
         blurredScreenshotImage = nil
         selection = nil
+        cropRect = nil
+        cropSession = nil
         dragMode = nil
         pointerPosition = nil
         drawingStrokePoints = []
@@ -1896,7 +1964,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             squares: squares,
             blurRegions: blurRegions,
             strokes: strokes,
-            textNotes: textNotes
+            textNotes: textNotes,
+            cropRect: cropRect
         )
     }
 
@@ -1904,11 +1973,14 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         if editingTextIndex != nil {
             endTextEditing(makeCanvasFirstResponder: false)
         }
+        let cropChanged = snapshot.cropRect != cropRect
         arrows = snapshot.arrows
         squares = snapshot.squares
         blurRegions = snapshot.blurRegions
         strokes = snapshot.strokes
         textNotes = snapshot.textNotes
+        cropRect = snapshot.cropRect
+        cropSession = nil
         selection = nil
         dragMode = nil
         drawingStrokePoints = []
@@ -1920,6 +1992,9 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
         updateOptionsVisibility()
+        if cropChanged {
+            fitCameraToContent()
+        }
         needsDisplay = true
     }
 
@@ -1968,6 +2043,281 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         needsDisplay = true
     }
 
+    // MARK: Crop
+
+    var isCropping: Bool { cropSession != nil }
+
+    /// Starts a crop session, seeded with the current crop (or the whole image).
+    /// The camera fits the full content so nothing the user might want to keep
+    /// is hidden behind the applied crop.
+    func beginCropSession() {
+        guard screenshot != nil, cropSession == nil else { return }
+        commitTextEditing()
+        selection = nil
+        dragMode = nil
+        pointerPosition = nil
+        drawingStrokePoints = []
+        let initial = cropRect ?? imageBounds
+        cropSession = CropSession(
+            rect: initial,
+            drag: nil,
+            originalRect: initial,
+            grabOffset: .zero
+        )
+        // Set the session before refreshing the options bar so it hides.
+        updateOptionsVisibility()
+        fitCameraToContent()
+        window?.invalidateCursorRects(for: self)
+        updateCursor(at: .zero)
+        needsDisplay = true
+        onCropSessionChanged?()
+    }
+
+    func cancelCropSession() {
+        guard cropSession != nil else { return }
+        cropSession = nil
+        fitCameraToContent()
+        window?.invalidateCursorRects(for: self)
+        updateCursor(at: .zero)
+        needsDisplay = true
+        onCropSessionChanged?()
+    }
+
+    func applyCropSession() {
+        guard let session = cropSession else { return }
+        let rect = integralCropRect(session.rect)
+        guard rect.width >= 8, rect.height >= 8 else {
+            // Too small to be useful; keep the session open so the user can
+            // adjust it instead of silently cropping to a sliver.
+            NSSound.beep()
+            return
+        }
+        cropSession = nil
+        let before = annotationSnapshot()
+        cropRect = rect == imageBounds ? nil : rect
+        registerAnnotationUndo(restoring: before, actionName: "Crop")
+        fitCameraToContent()
+        window?.invalidateCursorRects(for: self)
+        updateCursor(at: .zero)
+        needsDisplay = true
+        onCropSessionChanged?()
+    }
+
+    /// The whole captured image, in image units.
+    private var imageBounds: CGRect {
+        guard let screenshot else { return .zero }
+        return CGRect(
+            x: 0,
+            y: 0,
+            width: CGFloat(screenshot.width),
+            height: CGFloat(screenshot.height)
+        )
+    }
+
+    /// Rounds a crop frame to whole pixels and clamps it inside the image, so
+    /// the exported result lands on exact pixel boundaries.
+    private func integralCropRect(_ rect: CGRect) -> CGRect {
+        let bounds = imageBounds
+        let minX = floor(min(max(rect.minX, bounds.minX), bounds.maxX))
+        let minY = floor(min(max(rect.minY, bounds.minY), bounds.maxY))
+        let maxX = ceil(min(max(rect.maxX, bounds.minX), bounds.maxX))
+        let maxY = ceil(min(max(rect.maxY, bounds.minY), bounds.maxY))
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    /// Clamps each edge of a crop frame to the image, so the frame never leaves
+    /// the captured pixels while it is being dragged.
+    private func clampCropToImage(_ rect: CGRect) -> CGRect {
+        let bounds = imageBounds
+        let minX = min(max(rect.minX, bounds.minX), bounds.maxX)
+        let maxX = min(max(rect.maxX, bounds.minX), bounds.maxX)
+        let minY = min(max(rect.minY, bounds.minY), bounds.maxY)
+        let maxY = min(max(rect.maxY, bounds.minY), bounds.maxY)
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    /// Resizes the crop frame by moving the edges owned by `handle`, keeping a
+    /// minimum size so the frame cannot collapse or invert.
+    private func resizedCropRect(_ rect: CGRect, handle: CropHandle, to point: CGPoint) -> CGRect {
+        let minSize: CGFloat = 16
+        var minX = rect.minX
+        var maxX = rect.maxX
+        var minY = rect.minY
+        var maxY = rect.maxY
+
+        switch handle {
+        case .topLeft:
+            minX = point.x
+            minY = point.y
+        case .top:
+            minY = point.y
+        case .topRight:
+            maxX = point.x
+            minY = point.y
+        case .right:
+            maxX = point.x
+        case .bottomRight:
+            maxX = point.x
+            maxY = point.y
+        case .bottom:
+            maxY = point.y
+        case .bottomLeft:
+            minX = point.x
+            maxY = point.y
+        case .left:
+            minX = point.x
+        }
+
+        if maxX - minX < minSize {
+            if handle == .left || handle == .topLeft || handle == .bottomLeft {
+                minX = maxX - minSize
+            } else {
+                maxX = minX + minSize
+            }
+        }
+        if maxY - minY < minSize {
+            if handle == .top || handle == .topLeft || handle == .topRight {
+                minY = maxY - minSize
+            } else {
+                maxY = minY + minSize
+            }
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    private func cropHandlePoints(for frame: CGRect) -> [(CropHandle, CGPoint)] {
+        [
+            (.topLeft, CGPoint(x: frame.minX, y: frame.minY)),
+            (.top, CGPoint(x: frame.midX, y: frame.minY)),
+            (.topRight, CGPoint(x: frame.maxX, y: frame.minY)),
+            (.right, CGPoint(x: frame.maxX, y: frame.midY)),
+            (.bottomRight, CGPoint(x: frame.maxX, y: frame.maxY)),
+            (.bottom, CGPoint(x: frame.midX, y: frame.maxY)),
+            (.bottomLeft, CGPoint(x: frame.minX, y: frame.maxY)),
+            (.left, CGPoint(x: frame.minX, y: frame.midY))
+        ]
+    }
+
+    private func cropHandle(at point: CGPoint, in rect: CGRect) -> CropHandle? {
+        let tolerance = handleRadius + 3
+        for (handle, handlePoint) in cropHandlePoints(for: viewRect(for: rect)) {
+            if distance(from: point, to: handlePoint) <= tolerance {
+                return handle
+            }
+        }
+        return nil
+    }
+
+    /// A canvas point clamped to the image, used while editing the crop frame.
+    private func clampedCropPoint(_ pointInView: CGPoint) -> CGPoint {
+        let content = viewToContent(clampedViewPoint(pointInView))
+        let bounds = imageBounds
+        return CGPoint(
+            x: min(max(content.x, bounds.minX), bounds.maxX),
+            y: min(max(content.y, bounds.minY), bounds.maxY)
+        )
+    }
+
+    private func cropMouseDown(with event: NSEvent) {
+        guard var session = cropSession else { return }
+        ensureCamera()
+        let pointInView = convert(event.locationInWindow, from: nil)
+        let contentPoint = clampedCropPoint(pointInView)
+
+        if let handle = cropHandle(at: pointInView, in: session.rect) {
+            session.drag = .resize(handle)
+            session.originalRect = session.rect
+        } else if viewRect(for: session.rect).contains(pointInView) {
+            session.drag = .move
+            session.originalRect = session.rect
+            session.grabOffset = CGPoint(
+                x: contentPoint.x - session.rect.minX,
+                y: contentPoint.y - session.rect.minY
+            )
+        } else {
+            // Dragging outside the frame starts a brand-new selection.
+            session.drag = .create(start: contentPoint)
+            session.originalRect = session.rect
+            session.rect = CGRect(origin: contentPoint, size: .zero)
+        }
+        cropSession = session
+        needsDisplay = true
+    }
+
+    private func cropMouseDragged(with event: NSEvent) {
+        guard var session = cropSession, let drag = session.drag else { return }
+        let contentPoint = clampedCropPoint(
+            clampedViewPoint(convert(event.locationInWindow, from: nil))
+        )
+
+        switch drag {
+        case .create(let start):
+            session.rect = clampCropToImage(normalizedRect(from: start, to: contentPoint))
+        case .move:
+            let origin = CGPoint(
+                x: contentPoint.x - session.grabOffset.x,
+                y: contentPoint.y - session.grabOffset.y
+            )
+            session.rect = clampCropToImage(
+                CGRect(origin: origin, size: session.originalRect.size)
+            )
+        case .resize(let handle):
+            session.rect = clampCropToImage(
+                resizedCropRect(session.originalRect, handle: handle, to: contentPoint)
+            )
+        }
+        cropSession = session
+        needsDisplay = true
+    }
+
+    private func cropMouseUp() {
+        guard var session = cropSession else { return }
+        session.drag = nil
+        cropSession = session
+        needsDisplay = true
+    }
+
+    private func drawCropOverlay() {
+        guard let session = cropSession else { return }
+        let frame = viewRect(for: session.rect)
+
+        // Dim everything outside the frame with an even-odd hole.
+        let mask = NSBezierPath(rect: bounds)
+        mask.appendRect(frame)
+        mask.windingRule = .evenOdd
+        NSColor.black.withAlphaComponent(0.45).setFill()
+        mask.fill()
+
+        // Rule-of-thirds guides, so the frame is easy to line up.
+        let thirds = NSBezierPath()
+        for fraction in [1.0 / 3.0, 2.0 / 3.0] {
+            let x = frame.minX + frame.width * fraction
+            let y = frame.minY + frame.height * fraction
+            thirds.move(to: CGPoint(x: x, y: frame.minY))
+            thirds.line(to: CGPoint(x: x, y: frame.maxY))
+            thirds.move(to: CGPoint(x: frame.minX, y: y))
+            thirds.line(to: CGPoint(x: frame.maxX, y: y))
+        }
+        thirds.lineWidth = 1
+        NSColor.white.withAlphaComponent(0.35).setStroke()
+        thirds.stroke()
+
+        NSColor.white.setStroke()
+        let border = NSBezierPath(rect: frame)
+        border.lineWidth = 1.5
+        border.stroke()
+
+        for (_, point) in cropHandlePoints(for: frame) {
+            let handle = NSRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8)
+            let path = NSBezierPath(roundedRect: handle, xRadius: 2, yRadius: 2)
+            NSColor.white.setFill()
+            path.fill()
+            NSColor.black.withAlphaComponent(0.35).setStroke()
+            path.lineWidth = 1
+            path.stroke()
+        }
+    }
+
     // MARK: Layout
 
     override func layout() {
@@ -1999,15 +2349,24 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         guard let screenshot, let screenshotImage else { return }
         ensureCamera()
         let destination = imageRect
+        let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
+        let scale = cameraScale
+
+        // Outside a crop session the content is clipped to the applied crop, so
+        // the canvas shows the cropped result. During a session the whole image
+        // stays visible and the crop is drawn as an adjustable overlay instead.
+        let cropClip = cropSession == nil ? cropRect.map { viewRect(for: $0) } : nil
+        if let cropClip {
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: cropClip).addClip()
+        }
+
         screenshotImage.draw(in: destination)
 
         NSColor.black.withAlphaComponent(0.18).setStroke()
-        let border = NSBezierPath(rect: destination.insetBy(dx: -0.5, dy: -0.5))
+        let border = NSBezierPath(rect: (cropClip ?? destination).insetBy(dx: -0.5, dy: -0.5))
         border.lineWidth = 1
         border.stroke()
-
-        let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
-        let scale = cameraScale
 
         // Blur affects the image itself, so it renders directly over the
         // screenshot and underneath every annotation.
@@ -2096,6 +2455,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             )
         }
 
+        if cropClip != nil {
+            NSGraphicsContext.restoreGraphicsState()
+        }
+
         // Selection handles always stay visible above every annotation.
         if case .square(let index)? = selection, squares.indices.contains(index) {
             drawHandles(for: squares[index])
@@ -2108,6 +2471,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         } else if case .text(let index)? = selection, textNotes.indices.contains(index),
                   index != editingTextIndex {
             drawHandles(for: textNotes[index])
+        }
+
+        if cropSession != nil {
+            drawCropOverlay()
         }
     }
 
@@ -2742,6 +3109,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             commitTextEditing()
             return
         }
+        if cropSession != nil {
+            cropMouseDown(with: event)
+            return
+        }
         guard activeTool != nil else { return }
         ensureCamera()
         let pointInView = convert(event.locationInWindow, from: nil)
@@ -2871,6 +3242,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if cropSession != nil {
+            cropMouseDragged(with: event)
+            return
+        }
         guard let mode = dragMode else { return }
         didDragAnnotation = true
         let pointInView = clampedViewPoint(convert(event.locationInWindow, from: nil))
@@ -2978,6 +3353,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if cropSession != nil {
+            cropMouseUp()
+            return
+        }
         guard let mode = dragMode else { return }
         dragMode = nil
         var createdAnnotation = false
@@ -3158,6 +3537,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     private func updateCursor(at point: CGPoint) {
+        if cropSession != nil {
+            updateCropCursor(at: point)
+            return
+        }
         // The options panel floats inside the canvas and is full of regular
         // controls, so keep the standard arrow there even with the text tool.
         let overOptions = !optionsPanel.isHidden && optionsPanel.frame.contains(point)
@@ -3169,9 +3552,27 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         }
     }
 
+    private func updateCropCursor(at point: CGPoint) {
+        guard let session = cropSession,
+              let handle = cropHandle(at: point, in: session.rect) else {
+            NSCursor.crosshair.set()
+            return
+        }
+        switch handle {
+        case .left, .right:
+            NSCursor.resizeLeftRight.set()
+        case .top, .bottom:
+            NSCursor.resizeUpDown.set()
+        case .topLeft, .topRight, .bottomLeft, .bottomRight:
+            NSCursor.crosshair.set()
+        }
+    }
+
     override func resetCursorRects() {
         super.resetCursorRects()
-        if activeTool == .text, screenshot != nil {
+        if cropSession != nil {
+            addCursorRect(bounds, cursor: .crosshair)
+        } else if activeTool == .text, screenshot != nil {
             addCursorRect(imageRect, cursor: .iBeam)
         } else {
             addCursorRect(bounds, cursor: .arrow)
@@ -3429,7 +3830,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     /// follows the selected annotation instead. Blur has no options, so it
     /// hides the bar.
     private var optionsMode: ArrowOptionsPanel.Mode? {
-        guard screenshot != nil else { return nil }
+        guard screenshot != nil, cropSession == nil else { return nil }
         switch activeTool {
         case .some(.arrow):
             return .arrow
@@ -3486,6 +3887,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     /// Returns false when there is nothing left to cancel.
     @discardableResult
     func handleEscape() -> Bool {
+        if cropSession != nil {
+            cancelCropSession()
+            return true
+        }
         if dragMode != nil {
             dragMode = nil
             pointerPosition = nil
@@ -3536,6 +3941,11 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     override func keyDown(with event: NSEvent) {
+        if cropSession != nil, event.keyCode == 36 || event.keyCode == 76 {
+            // Return or keypad Enter applies the crop.
+            applyCropSession()
+            return
+        }
         if event.keyCode == 53 {
             if editingTextIndex != nil {
                 commitTextEditing()
@@ -3812,9 +4222,12 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     /// Hard limit for how far annotations can be drawn from the image. Keeps
-    /// accidental endless zoom-outs from producing enormous exports.
+    /// accidental endless zoom-outs from producing enormous exports. With a crop
+    /// applied the limit is the crop frame, so nothing can be drawn into the
+    /// clipped-away area.
     private var allowedContentRect: CGRect {
         guard let screenshot else { return .zero }
+        if let cropRect { return cropRect }
         let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
         let padding = max(2048, max(imageSize.width, imageSize.height))
         return CGRect(
@@ -3841,10 +4254,17 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         return min(scale, 1)
     }
 
-    /// Fits the content into the viewport with a border on every side.
+    /// Fits the content into the viewport with a border on every side. With a
+    /// crop applied this fits the crop frame; during a crop session it fits the
+    /// whole image plus annotations so nothing is hidden.
     private func fitCameraToContent() {
         guard screenshot != nil, bounds.width > 1, bounds.height > 1 else { return }
-        let content = contentBoundsForCamera
+        let content: CGRect
+        if cropSession == nil, let cropRect {
+            content = cropRect
+        } else {
+            content = contentBoundsForCamera
+        }
         guard content.width > 0, content.height > 0 else { return }
         cameraScale = max(minimumCameraScale, fittedScale(for: content))
         cameraCenter = CGPoint(x: content.midX, y: content.midY)
@@ -3940,26 +4360,33 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         guard imageWidth > 0, imageHeight > 0 else { return nil }
 
         let imageSize = CGSize(width: imageWidth, height: imageHeight)
-        var exportBounds = CGRect(
-            x: 0,
-            y: 0,
-            width: CGFloat(imageWidth),
-            height: CGFloat(imageHeight)
-        )
-        for arrow in arrows {
-            exportBounds = exportBounds.union(arrowBounds(for: arrow, imageSize: imageSize))
-        }
-        for square in squares {
-            exportBounds = exportBounds.union(squareBounds(for: square, imageSize: imageSize))
-        }
-        for region in blurRegions {
-            exportBounds = exportBounds.union(region.rect)
-        }
-        for stroke in strokes {
-            exportBounds = exportBounds.union(strokeBounds(for: stroke, imageSize: imageSize))
-        }
-        for note in textNotes {
-            exportBounds = exportBounds.union(textBounds(for: note))
+        var exportBounds: CGRect
+        if let cropRect {
+            // The crop frame is authoritative: annotations outside it are cut
+            // off rather than growing the output.
+            exportBounds = cropRect
+        } else {
+            exportBounds = CGRect(
+                x: 0,
+                y: 0,
+                width: CGFloat(imageWidth),
+                height: CGFloat(imageHeight)
+            )
+            for arrow in arrows {
+                exportBounds = exportBounds.union(arrowBounds(for: arrow, imageSize: imageSize))
+            }
+            for square in squares {
+                exportBounds = exportBounds.union(squareBounds(for: square, imageSize: imageSize))
+            }
+            for region in blurRegions {
+                exportBounds = exportBounds.union(region.rect)
+            }
+            for stroke in strokes {
+                exportBounds = exportBounds.union(strokeBounds(for: stroke, imageSize: imageSize))
+            }
+            for note in textNotes {
+                exportBounds = exportBounds.union(textBounds(for: note))
+            }
         }
 
         let originX = floor(exportBounds.minX)
