@@ -15,12 +15,11 @@ enum SshooterMain {
 }
 
 @MainActor
-private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private var hotKey: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
     private var statusMenu: NSMenu?
-    private var reopenEditorItem: NSMenuItem?
     private var settingsWindowController: SettingsWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -48,7 +47,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func buildStatusMenu() {
         let menu = NSMenu()
-        menu.delegate = self
 
         let reopenItem = NSMenuItem(
             title: "Reopen editor",
@@ -56,9 +54,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             keyEquivalent: ""
         )
         reopenItem.target = self
-        reopenItem.isEnabled = CaptureModel.shared.canReopenEditor
         menu.addItem(reopenItem)
-        reopenEditorItem = reopenItem
 
         menu.addItem(.separator())
 
@@ -93,8 +89,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         statusMenu = menu
     }
 
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        reopenEditorItem?.isEnabled = CaptureModel.shared.canReopenEditor
+    /// Menu items are auto-enabled when their target responds to the action, so
+    /// "Reopen editor" must opt out of that and follow the stored capture.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(reopenEditor(_:)) {
+            return CaptureModel.shared.canReopenEditor
+        }
+        return true
     }
 
     @objc private func reopenEditor(_ sender: Any?) {
