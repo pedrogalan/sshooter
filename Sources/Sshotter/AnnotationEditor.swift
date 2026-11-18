@@ -84,6 +84,7 @@ enum AnnotationTool {
     case arrow
     case square
     case blur
+    case highlight
     case text
 }
 
@@ -151,6 +152,42 @@ enum ArrowPreferences {
             guard defaults.object(forKey: colorKey) != nil,
                   let value = ArrowColor(rawValue: defaults.integer(forKey: colorKey)) else {
                 return .red
+            }
+            return value
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: colorKey)
+        }
+    }
+
+    static var lineWidth: ArrowLineWidth {
+        get {
+            let defaults = UserDefaults.standard
+            guard defaults.object(forKey: lineWidthKey) != nil,
+                  let value = ArrowLineWidth(rawValue: defaults.integer(forKey: lineWidthKey)) else {
+                return .regular
+            }
+            return value
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: lineWidthKey)
+        }
+    }
+}
+
+enum HighlightPreferences {
+    private static let colorKey = "highlightColor"
+    private static let lineWidthKey = "highlightLineWidth"
+
+    /// Marker strokes are translucent so whatever they cover stays readable.
+    static let alpha: CGFloat = 0.4
+
+    static var color: ArrowColor {
+        get {
+            let defaults = UserDefaults.standard
+            guard defaults.object(forKey: colorKey) != nil,
+                  let value = ArrowColor(rawValue: defaults.integer(forKey: colorKey)) else {
+                return .yellow
             }
             return value
         }
@@ -297,6 +334,47 @@ enum ArrowGeometry {
     }
 }
 
+enum HighlightGeometry {
+    /// Marker strokes are deliberately chunkier than arrow strokes, which use
+    /// the same thickness multipliers on a much thinner base.
+    static func lineWidth(forImageSize size: CGSize, thickness: ArrowLineWidth) -> CGFloat {
+        let base = max(8, min(size.width, size.height) * 0.012)
+        return base * thickness.multiplier
+    }
+
+    /// A smoothed freehand path through the sampled points. Consecutive
+    /// midpoints become quadratic curve endpoints, which removes the polyline
+    /// look without pulling the stroke away from where the pointer went.
+    static func path(points: [CGPoint], transform: (CGPoint) -> CGPoint) -> NSBezierPath {
+        let path = NSBezierPath()
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        guard let first = points.first else { return path }
+        path.move(to: transform(first))
+
+        guard points.count > 2 else {
+            if let last = points.last, points.count == 2 {
+                path.line(to: transform(last))
+            }
+            return path
+        }
+
+        for index in 1..<(points.count - 1) {
+            let current = points[index]
+            let next = points[index + 1]
+            let midpoint = CGPoint(
+                x: (current.x + next.x) / 2,
+                y: (current.y + next.y) / 2
+            )
+            path.curve(to: transform(midpoint), controlPoint: transform(current))
+        }
+        if let last = points.last {
+            path.line(to: transform(last))
+        }
+        return path
+    }
+}
+
 // MARK: - Editor window
 
 @MainActor
@@ -333,6 +411,10 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         symbolName: "camera.filters",
         toolTip: "Blur tool: drag over an area to blur it. Click again to stop drawing."
     )
+    private let highlightButton = ToolStripButton(
+        symbolName: "highlighter",
+        toolTip: "Highlight tool: drag to draw a translucent marker stroke. Click again to stop drawing."
+    )
     private let textButton = ToolStripButton(
         symbolName: "character.cursor.ibeam",
         toolTip: "Text tool: click the canvas to add text. Drag text to move it; double-click to edit."
@@ -368,6 +450,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         arrowButton.setActive(false)
         squareButton.setActive(false)
         blurButton.setActive(false)
+        highlightButton.setActive(false)
         textButton.setActive(false)
     }
 
@@ -406,7 +489,12 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         blurButton.action = #selector(toggleBlurTool(_:))
         toolStrip.addSubview(blurButton)
 
-        textButton.frame = NSRect(x: 282, y: 8, width: 40, height: 32)
+        highlightButton.frame = NSRect(x: 282, y: 8, width: 40, height: 32)
+        highlightButton.target = self
+        highlightButton.action = #selector(toggleHighlightTool(_:))
+        toolStrip.addSubview(highlightButton)
+
+        textButton.frame = NSRect(x: 326, y: 8, width: 40, height: 32)
         textButton.target = self
         textButton.action = #selector(toggleTextTool(_:))
         toolStrip.addSubview(textButton)
@@ -474,6 +562,10 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         toggleTool(.blur)
     }
 
+    @objc private func toggleHighlightTool(_ sender: Any?) {
+        toggleTool(.highlight)
+    }
+
     @objc private func toggleTextTool(_ sender: Any?) {
         toggleTool(.text)
     }
@@ -492,6 +584,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         arrowButton.setActive(false)
         squareButton.setActive(false)
         blurButton.setActive(false)
+        highlightButton.setActive(false)
         textButton.setActive(false)
         makeFirstResponder(canvas)
     }
@@ -503,6 +596,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
             arrowButton.setActive(false)
             squareButton.setActive(false)
             blurButton.setActive(false)
+            highlightButton.setActive(false)
             textButton.setActive(false)
         } else {
             selectTool(tool)
@@ -516,6 +610,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         arrowButton.setActive(tool == .arrow)
         squareButton.setActive(tool == .square)
         blurButton.setActive(tool == .blur)
+        highlightButton.setActive(tool == .highlight)
         textButton.setActive(tool == .text)
     }
 
@@ -994,6 +1089,7 @@ private final class ArrowOptionsPanel: NSView {
     enum Mode {
         case arrow
         case square
+        case highlight
         case text
     }
 
@@ -1010,6 +1106,8 @@ private final class ArrowOptionsPanel: NSView {
     var onThicknessSelected: (@MainActor (ArrowLineWidth) -> Void)?
     var onRoundedChanged: (@MainActor (Bool) -> Void)?
     var onFillChanged: (@MainActor (SquareFill) -> Void)?
+    var onHighlightColorSelected: (@MainActor (ArrowColor) -> Void)?
+    var onHighlightThicknessSelected: (@MainActor (ArrowLineWidth) -> Void)?
     var onTextColorSelected: (@MainActor (ArrowColor) -> Void)?
     var onBackgroundSelected: (@MainActor (TextBackground) -> Void)?
     var onTextSizeChanged: (@MainActor (Bool) -> Void)?
@@ -1027,6 +1125,8 @@ private final class ArrowOptionsPanel: NSView {
     private var sizeIncreaseButton = TextSizeButton(increase: true)
     private var isRounded = SquarePreferences.isRounded
     private var fill = SquarePreferences.fill
+    private var highlightColor = HighlightPreferences.color
+    private var highlightThickness = HighlightPreferences.lineWidth
     private var textColor = TextPreferences.color
     private var textBackground = TextPreferences.background
 
@@ -1114,6 +1214,7 @@ private final class ArrowOptionsPanel: NSView {
         addSubview(sizeIncreaseButton)
 
         updateSquareSelection(isRounded: isRounded, fill: fill)
+        updateHighlightSelection(color: highlightColor, thickness: highlightThickness)
         updateTextSelection(color: textColor, background: textBackground)
         layoutControls()
     }
@@ -1122,7 +1223,7 @@ private final class ArrowOptionsPanel: NSView {
     /// Arrow mode shows color and thickness; square mode adds the corners and
     /// fill levels; text mode shows text color, background color, and size.
     private func layoutControls() {
-        let showsThickness = mode == .arrow || mode == .square
+        let showsThickness = mode == .arrow || mode == .square || mode == .highlight
         let showsSquareControls = mode == .square
         let showsTextControls = mode == .text
 
@@ -1242,6 +1343,17 @@ private final class ArrowOptionsPanel: NSView {
         }
     }
 
+    func updateHighlightSelection(color: ArrowColor, thickness: ArrowLineWidth) {
+        highlightColor = color
+        highlightThickness = thickness
+        for button in swatchButtons {
+            button.setSelected(button.tag == color.rawValue)
+        }
+        for button in thicknessButtons {
+            button.setSelected(button.tag == thickness.rawValue)
+        }
+    }
+
     func updateTextSelection(color: ArrowColor, background: TextBackground) {
         textColor = color
         textBackground = background
@@ -1272,6 +1384,9 @@ private final class ArrowOptionsPanel: NSView {
         if mode == .text {
             updateTextSelection(color: color, background: textBackground)
             onTextColorSelected?(color)
+        } else if mode == .highlight {
+            updateHighlightSelection(color: color, thickness: currentThicknessFromButtons())
+            onHighlightColorSelected?(color)
         } else {
             updateSelection(color: color, thickness: currentThicknessFromButtons())
             onColorSelected?(color)
@@ -1289,8 +1404,13 @@ private final class ArrowOptionsPanel: NSView {
 
     @objc private func selectThickness(_ sender: NSButton) {
         guard let thickness = ArrowLineWidth(rawValue: sender.tag) else { return }
-        updateSelection(color: currentColorFromButtons(), thickness: thickness)
-        onThicknessSelected?(thickness)
+        if mode == .highlight {
+            updateHighlightSelection(color: currentColorFromButtons(), thickness: thickness)
+            onHighlightThicknessSelected?(thickness)
+        } else {
+            updateSelection(color: currentColorFromButtons(), thickness: thickness)
+            onThicknessSelected?(thickness)
+        }
     }
 
     private func currentColorFromButtons() -> ArrowColor {
@@ -1359,6 +1479,14 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         var rect: CGRect
     }
 
+    /// A freehand highlighter stroke. `points` are in image units; the marker
+    /// width comes from `thickness` at draw and export time.
+    private struct Highlight {
+        var points: [CGPoint]
+        var color: ArrowColor
+        var thickness: ArrowLineWidth
+    }
+
     /// A text annotation. `origin` is the top-left of the text in image units;
     /// the optional background rectangle is derived from the text metrics at
     /// draw time.
@@ -1374,6 +1502,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         var arrows: [Arrow]
         var squares: [Square]
         var blurRegions: [BlurRegion]
+        var highlights: [Highlight]
         var textNotes: [TextNote]
     }
 
@@ -1381,6 +1510,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case arrow(Int)
         case square(Int)
         case blur(Int)
+        case highlight(Int)
         case text(Int)
     }
 
@@ -1395,9 +1525,11 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case drawingArrow(start: CGPoint)
         case drawingSquare(start: CGPoint)
         case drawingBlur(start: CGPoint)
+        case drawingHighlight
         case moving(index: Int, original: Arrow, grabOffset: CGPoint)
         case movingSquare(index: Int, original: Square, grabOffset: CGPoint)
         case movingBlur(index: Int, original: BlurRegion, grabOffset: CGPoint)
+        case movingHighlight(index: Int, original: Highlight, grabOffset: CGPoint)
         case resizingStart(index: Int)
         case resizingEnd(index: Int)
         case resizingSquare(index: Int, original: CGRect, corner: SquareCorner)
@@ -1413,6 +1545,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case squareBody(Int)
         case blurCorner(Int, SquareCorner)
         case blurBody(Int)
+        case highlightBody(Int)
         case textBody(Int)
     }
 
@@ -1425,14 +1558,18 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var arrows: [Arrow] = []
     private var squares: [Square] = []
     private var blurRegions: [BlurRegion] = []
+    private var highlights: [Highlight] = []
     private var textNotes: [TextNote] = []
     private var selection: Selection?
     private var dragMode: DragMode?
     private var pointerPosition: CGPoint?
+    private var drawingHighlightPoints: [CGPoint] = []
     private var currentColor = ArrowPreferences.color
     private var currentThickness = ArrowPreferences.lineWidth
     private var currentRounded = SquarePreferences.isRounded
     private var currentFill = SquarePreferences.fill
+    private var currentHighlightColor = HighlightPreferences.color
+    private var currentHighlightThickness = HighlightPreferences.lineWidth
     private var currentTextColor = TextPreferences.color
     private var currentTextBackground = TextPreferences.background
     private var currentTextScale = TextPreferences.scale
@@ -1481,6 +1618,12 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         optionsPanel.onFillChanged = { [weak self] fill in
             self?.applyFill(fill)
         }
+        optionsPanel.onHighlightColorSelected = { [weak self] color in
+            self?.applyHighlightColor(color)
+        }
+        optionsPanel.onHighlightThicknessSelected = { [weak self] thickness in
+            self?.applyHighlightThickness(thickness)
+        }
         optionsPanel.onTextColorSelected = { [weak self] color in
             self?.applyTextColor(color)
         }
@@ -1492,6 +1635,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         }
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        optionsPanel.updateHighlightSelection(color: currentHighlightColor, thickness: currentHighlightThickness)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
         addSubview(optionsPanel)
     }
@@ -1516,21 +1660,26 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         currentThickness = ArrowPreferences.lineWidth
         currentRounded = SquarePreferences.isRounded
         currentFill = SquarePreferences.fill
+        currentHighlightColor = HighlightPreferences.color
+        currentHighlightThickness = HighlightPreferences.lineWidth
         currentTextColor = TextPreferences.color
         currentTextBackground = TextPreferences.background
         currentTextScale = TextPreferences.scale
         arrows.removeAll()
         squares.removeAll()
         blurRegions.removeAll()
+        highlights.removeAll()
         textNotes.removeAll()
         blurredScreenshot = nil
         blurredScreenshotImage = nil
         selection = nil
         dragMode = nil
         pointerPosition = nil
+        drawingHighlightPoints = []
         hasCamera = false
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        optionsPanel.updateHighlightSelection(color: currentHighlightColor, thickness: currentHighlightThickness)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
         updateOptionsVisibility(animated: false)
         fitCameraToContent()
@@ -1542,6 +1691,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             arrows: arrows,
             squares: squares,
             blurRegions: blurRegions,
+            highlights: highlights,
             textNotes: textNotes
         )
     }
@@ -1553,13 +1703,16 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         arrows = snapshot.arrows
         squares = snapshot.squares
         blurRegions = snapshot.blurRegions
+        highlights = snapshot.highlights
         textNotes = snapshot.textNotes
         selection = nil
         dragMode = nil
+        drawingHighlightPoints = []
         blurredScreenshot = nil
         blurredScreenshotImage = nil
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        optionsPanel.updateHighlightSelection(color: currentHighlightColor, thickness: currentHighlightThickness)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
         updateOptionsVisibility()
         needsDisplay = true
@@ -1594,12 +1747,14 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         activeTool = tool
         dragMode = nil
         pointerPosition = nil
+        drawingHighlightPoints = []
         selection = nil
         if tool == .blur {
             ensureBlurredScreenshot()
         }
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        optionsPanel.updateHighlightSelection(color: currentHighlightColor, thickness: currentHighlightThickness)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
         updateOptionsVisibility()
         window?.invalidateCursorRects(for: self)
@@ -1655,6 +1810,23 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         }
         if let pointerPosition, case .drawingBlur(let start)? = dragMode {
             drawBlur(BlurRegion(rect: normalizedRect(from: start, to: pointerPosition)))
+        }
+
+        // Highlighter strokes tint the content but stay below the sharper
+        // annotations, so squares and arrows remain easy to read and select.
+        for highlight in highlights {
+            drawHighlight(highlight, imageSize: imageSize, scale: scale)
+        }
+        if case .drawingHighlight? = dragMode {
+            drawHighlight(
+                Highlight(
+                    points: drawingHighlightPoints,
+                    color: currentHighlightColor,
+                    thickness: currentHighlightThickness
+                ),
+                imageSize: imageSize,
+                scale: scale
+            )
         }
 
         // Squares sit behind arrows so arrows stay easy to read and select.
@@ -1722,6 +1894,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             drawHandles(for: arrows[index])
         } else if case .blur(let index)? = selection, blurRegions.indices.contains(index) {
             drawHandles(for: blurRegions[index])
+        } else if case .highlight(let index)? = selection, highlights.indices.contains(index) {
+            drawHandles(for: highlights[index])
         } else if case .text(let index)? = selection, textNotes.indices.contains(index),
                   index != editingTextIndex {
             drawHandles(for: textNotes[index])
@@ -1795,6 +1969,21 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         NSGraphicsContext.restoreGraphicsState()
     }
 
+    private func drawHighlight(_ highlight: Highlight, imageSize: CGSize, scale: CGFloat) {
+        guard highlight.points.count >= 2 else { return }
+        let lineWidth = HighlightGeometry.lineWidth(
+            forImageSize: imageSize,
+            thickness: highlight.thickness
+        ) * scale
+        let path = HighlightGeometry.path(
+            points: highlight.points,
+            transform: { self.contentToView($0) }
+        )
+        path.lineWidth = lineWidth
+        highlight.color.nsColor.withAlphaComponent(HighlightPreferences.alpha).setStroke()
+        path.stroke()
+    }
+
     private func blurRadius(for imageSize: CGSize) -> CGFloat {
         let base = min(imageSize.width, imageSize.height)
         return min(max(base * 0.012, 8), 48)
@@ -1847,6 +2036,27 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             width: abs(end.x - start.x),
             height: abs(end.y - start.y)
         )
+    }
+
+    /// Adds a sample to the in-progress marker stroke, dropping points that are
+    /// too close together so the path stays light and smooth.
+    private func appendHighlightPoint(_ point: CGPoint) {
+        guard let last = drawingHighlightPoints.last else {
+            drawingHighlightPoints = [point]
+            return
+        }
+        let threshold = max(1, 1.5 / cameraScale)
+        guard distance(from: point, to: last) >= threshold else { return }
+        drawingHighlightPoints.append(point)
+    }
+
+    private func polylineLength(_ points: [CGPoint]) -> CGFloat {
+        guard points.count >= 2 else { return 0 }
+        var length: CGFloat = 0
+        for index in 0..<(points.count - 1) {
+            length += distance(from: points[index], to: points[index + 1])
+        }
+        return length
     }
 
     private func resizedRect(_ rect: CGRect, corner: SquareCorner, to point: CGPoint) -> CGRect {
@@ -1951,6 +2161,39 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         NSColor.controlAccentColor.withAlphaComponent(0.9).setStroke()
         outline.lineWidth = 1
         outline.stroke()
+    }
+
+    private func drawHandles(for highlight: Highlight) {
+        guard let screenshot else { return }
+        let imageSize = CGSize(width: screenshot.width, height: screenshot.height)
+        let rect = viewRect(for: highlightBounds(for: highlight, imageSize: imageSize))
+        let outline = NSBezierPath(rect: rect.insetBy(dx: -2, dy: -2))
+        outline.setLineDash([4, 3], count: 2, phase: 0)
+        NSColor.controlAccentColor.withAlphaComponent(0.9).setStroke()
+        outline.lineWidth = 1
+        outline.stroke()
+    }
+
+    /// Bounding box of a marker stroke including its width, in image units.
+    private func highlightBounds(for highlight: Highlight, imageSize: CGSize) -> CGRect {
+        guard let first = highlight.points.first else { return .zero }
+        var minX = first.x
+        var maxX = first.x
+        var minY = first.y
+        var maxY = first.y
+        for point in highlight.points {
+            minX = min(minX, point.x)
+            maxX = max(maxX, point.x)
+            minY = min(minY, point.y)
+            maxY = max(maxY, point.y)
+        }
+        let lineWidth = HighlightGeometry.lineWidth(
+            forImageSize: imageSize,
+            thickness: highlight.thickness
+        )
+        let padding = lineWidth / 2 + 1
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+            .insetBy(dx: -padding, dy: -padding)
     }
 
     // MARK: Text layout and drawing
@@ -2335,6 +2578,18 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                         y: contentPoint.y - region.rect.minY
                     )
                 )
+            case .highlightBody(let index):
+                guard let first = highlights[index].points.first else { break }
+                let highlight = highlights[index]
+                selectHighlight(at: index)
+                dragMode = .movingHighlight(
+                    index: index,
+                    original: highlight,
+                    grabOffset: CGPoint(
+                        x: contentPoint.x - first.x,
+                        y: contentPoint.y - first.y
+                    )
+                )
             case .textBody(let index):
                 selectText(at: index)
                 if event.clickCount >= 2 {
@@ -2355,6 +2610,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             selection = nil
             optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
             optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+            optionsPanel.updateHighlightSelection(color: currentHighlightColor, thickness: currentHighlightThickness)
             optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
             updateOptionsVisibility()
             switch activeTool {
@@ -2366,6 +2622,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 pointerPosition = contentPoint
             case .some(.blur):
                 dragMode = .drawingBlur(start: contentPoint)
+                pointerPosition = contentPoint
+            case .some(.highlight):
+                dragMode = .drawingHighlight
+                drawingHighlightPoints = [contentPoint]
                 pointerPosition = contentPoint
             case .some(.text):
                 dragMode = nil
@@ -2386,6 +2646,9 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
         switch mode {
         case .drawingArrow, .drawingSquare, .drawingBlur:
+            pointerPosition = point
+        case .drawingHighlight:
+            appendHighlightPoint(point)
             pointerPosition = point
         case let .moving(index, original, grabOffset):
             let proposedStart = CGPoint(
@@ -2431,6 +2694,26 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             dy = min(max(dy, limits.minY - original.rect.minY), limits.maxY - original.rect.maxY)
 
             blurRegions[index].rect = original.rect.offsetBy(dx: dx, dy: dy)
+        case let .movingHighlight(index, original, grabOffset):
+            guard highlights.indices.contains(index), let first = original.points.first else { break }
+            let proposedOrigin = CGPoint(
+                x: point.x - grabOffset.x,
+                y: point.y - grabOffset.y
+            )
+            var dx = proposedOrigin.x - first.x
+            var dy = proposedOrigin.y - first.y
+
+            let limits = visibleContentRect
+            let bounds = highlightBounds(
+                for: original,
+                imageSize: CGSize(width: screenshot?.width ?? 0, height: screenshot?.height ?? 0)
+            )
+            dx = min(max(dx, limits.minX - bounds.minX), limits.maxX - bounds.maxX)
+            dy = min(max(dy, limits.minY - bounds.minY), limits.maxY - bounds.maxY)
+
+            highlights[index].points = original.points.map {
+                CGPoint(x: $0.x + dx, y: $0.y + dy)
+            }
         case .resizingStart(let index):
             arrows[index].start = point
         case .resizingEnd(let index):
@@ -2521,11 +2804,26 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                     selection = nil
                 }
             }
+        case .drawingHighlight:
+            if drawingHighlightPoints.count >= 2,
+               polylineLength(drawingHighlightPoints) * cameraScale >= minimumDragDistance {
+                highlights.append(Highlight(
+                    points: drawingHighlightPoints,
+                    color: currentHighlightColor,
+                    thickness: currentHighlightThickness
+                ))
+                createdAnnotation = true
+                selection = .highlight(highlights.count - 1)
+                updateOptionsVisibility()
+            } else {
+                selection = nil
+            }
         default:
             break
         }
 
         pointerPosition = nil
+        drawingHighlightPoints = []
         if (createdAnnotation || didDragAnnotation), let dragUndoSnapshot {
             let actionName = createdAnnotation ? "Add Annotation" : "Edit Annotation"
             registerAnnotationUndo(restoring: dragUndoSnapshot, actionName: actionName)
@@ -2676,6 +2974,19 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         updateOptionsVisibility()
     }
 
+    private func selectHighlight(at index: Int) {
+        guard highlights.indices.contains(index) else { return }
+        selection = .highlight(index)
+        let highlight = highlights[index]
+        currentHighlightColor = highlight.color
+        currentHighlightThickness = highlight.thickness
+        optionsPanel.updateHighlightSelection(
+            color: currentHighlightColor,
+            thickness: currentHighlightThickness
+        )
+        updateOptionsVisibility()
+    }
+
     private func selectText(at index: Int) {
         guard textNotes.indices.contains(index) else { return }
         selection = .text(index)
@@ -2748,6 +3059,34 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         window?.makeFirstResponder(self)
     }
 
+    private func applyHighlightColor(_ color: ArrowColor) {
+        let before = annotationSnapshot()
+        var changedAnnotation = false
+        currentHighlightColor = color
+        HighlightPreferences.color = color
+        if case .highlight(let index)? = selection, highlights.indices.contains(index) {
+            highlights[index].color = color
+            changedAnnotation = true
+        }
+        if changedAnnotation { registerAnnotationUndo(restoring: before, actionName: "Change Highlight Color") }
+        needsDisplay = true
+        window?.makeFirstResponder(self)
+    }
+
+    private func applyHighlightThickness(_ thickness: ArrowLineWidth) {
+        let before = annotationSnapshot()
+        var changedAnnotation = false
+        currentHighlightThickness = thickness
+        HighlightPreferences.lineWidth = thickness
+        if case .highlight(let index)? = selection, highlights.indices.contains(index) {
+            highlights[index].thickness = thickness
+            changedAnnotation = true
+        }
+        if changedAnnotation { registerAnnotationUndo(restoring: before, actionName: "Change Highlight Thickness") }
+        needsDisplay = true
+        window?.makeFirstResponder(self)
+    }
+
     private func applyTextColor(_ color: ArrowColor) {
         let before = annotationSnapshot()
         var changedAnnotation = false
@@ -2813,6 +3152,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             return .square
         case .some(.blur):
             return nil
+        case .some(.highlight):
+            return .highlight
         case .some(.text):
             return .text
         case .none:
@@ -2821,6 +3162,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 return .arrow
             case .some(.square):
                 return .square
+            case .some(.highlight):
+                return .highlight
             case .some(.text):
                 return .text
             default:
@@ -2887,6 +3230,9 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case .blur(let index):
             guard blurRegions.indices.contains(index) else { return false }
             blurRegions.remove(at: index)
+        case .highlight(let index):
+            guard highlights.indices.contains(index) else { return false }
+            highlights.remove(at: index)
         case .text(let index):
             guard textNotes.indices.contains(index) else { return false }
             textNotes.remove(at: index)
@@ -2895,6 +3241,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         self.selection = nil
         optionsPanel.updateSelection(color: currentColor, thickness: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
+        optionsPanel.updateHighlightSelection(color: currentHighlightColor, thickness: currentHighlightThickness)
         updateOptionsVisibility()
         needsDisplay = true
         return true
@@ -3037,6 +3384,24 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             }
         }
 
+        // Highlighter strokes sit between the squares and the blur regions, so
+        // they are hit-tested in that order.
+        for index in highlights.indices.reversed() {
+            let highlight = highlights[index]
+            guard highlight.points.count >= 2 else { continue }
+            let lineWidth = HighlightGeometry.lineWidth(
+                forImageSize: imageSize,
+                thickness: highlight.thickness
+            )
+            let tolerance = max(6, lineWidth * scale * 0.6)
+            let points = highlight.points.map { contentToView($0) }
+            for position in 0..<(points.count - 1) {
+                if distance(from: point, toSegmentFrom: points[position], to: points[position + 1]) <= tolerance {
+                    return .highlightBody(index)
+                }
+            }
+        }
+
         // Blur regions sit underneath the visible annotations. They only
         // capture pointer events while selected, with the blur tool active,
         // or with every tool switched off, so arrows and squares can still be
@@ -3097,6 +3462,9 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         for region in blurRegions {
             bounds = bounds.union(region.rect)
         }
+        for highlight in highlights {
+            bounds = bounds.union(highlightBounds(for: highlight, imageSize: imageSize))
+        }
         for note in textNotes {
             bounds = bounds.union(textBounds(for: note))
         }
@@ -3133,6 +3501,17 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 ))
             case .drawingBlur(let start)?:
                 bounds = bounds.union(normalizedRect(from: start, to: pointerPosition))
+            case .drawingHighlight?:
+                if drawingHighlightPoints.count >= 2 {
+                    bounds = bounds.union(highlightBounds(
+                        for: Highlight(
+                            points: drawingHighlightPoints,
+                            color: currentHighlightColor,
+                            thickness: currentHighlightThickness
+                        ),
+                        imageSize: imageSize
+                    ))
+                }
             default:
                 break
             }
@@ -3284,6 +3663,9 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         for region in blurRegions {
             exportBounds = exportBounds.union(region.rect)
         }
+        for highlight in highlights {
+            exportBounds = exportBounds.union(highlightBounds(for: highlight, imageSize: imageSize))
+        }
         for note in textNotes {
             exportBounds = exportBounds.union(textBounds(for: note))
         }
@@ -3331,6 +3713,29 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
         context.setLineCap(.round)
         context.setLineJoin(.round)
+
+        // Highlighter strokes render below the squares and arrows, matching
+        // the editor. The alpha keeps the content underneath readable.
+        for highlight in highlights {
+            guard highlight.points.count >= 2 else { continue }
+            let lineWidth = HighlightGeometry.lineWidth(
+                forImageSize: imageSize,
+                thickness: highlight.thickness
+            )
+            let path = HighlightGeometry.path(
+                points: highlight.points,
+                transform: {
+                    self.exportPoint($0, originX: originX, originY: originY, exportHeight: exportHeight)
+                }
+            )
+            context.setStrokeColor(
+                highlight.color.cgColor.copy(alpha: HighlightPreferences.alpha)
+                    ?? highlight.color.cgColor
+            )
+            context.setLineWidth(lineWidth)
+            context.addPath(path.cgPath)
+            context.strokePath()
+        }
 
         // Squares render below arrows, matching the editor.
         for square in squares {

@@ -1,6 +1,6 @@
 # sShooter
 
-sShooter is a lightweight, native macOS menu bar screenshot utility. Press **⌘⇧2**, drag over an area of the screen, and mark it up with arrows, squares, text, and blur before copying or saving it.
+sShooter is a lightweight, native macOS menu bar screenshot utility. Press **⌘⇧2**, drag over an area of the screen, and mark it up with arrows, squares, highlights, text, and blur before copying or saving it.
 
 [Download sShooter](https://github.com/pedrogalan/sshooter/releases/latest)
 
@@ -28,11 +28,12 @@ The selected area opens in the annotation window. The Pointer tool is selected b
 - **Arrow** — drag on the canvas to draw an arrow. The arrow tool stays highlighted while it is active; click it again to return to the Pointer tool. The new arrow stays selected: drag either endpoint to change its length or direction, or drag the line itself to move the whole arrow.
 - **Square** — drag on the canvas to mark an area. Squares stay selected after drawing; drag a corner to resize, or drag the body to move one.
 - **Blur** — drag a rectangle to redact part of the capture; the image underneath is blurred. Blur regions are edited like squares. Blur is baked into Copy and Save at full resolution.
+- **Highlight** — drag freehand to draw a translucent marker stroke, like a real highlighter. The stroke stays selected after drawing; drag it to move it. Highlight strokes render above blur but below arrows and squares, so sharper annotations stay legible on top.
 - **Text** — with the text tool active the pointer becomes an I-beam: click anywhere to start typing. **Return** adds a newline so labels can span several lines; click outside the label or press **Esc** to commit it. Drag a label to move it, double-click it to edit the wording. Text renders above the arrows, squares, and blur regions.
 
 Press **Delete** to remove the selected annotation. Use **⌘Z** to undo annotation changes and **⇧⌘Z** to redo them. Text entry is undoable one edit at a time, including after you commit the label.
 
-As soon as a drawing tool is selected, an options bar appears at the top-right and shows only that tool’s controls. The arrow tool shows colour swatches and line thickness buttons. The square tool shows the same colour and thickness controls plus a rounded-corner toggle and three fill buttons: **full transparency** (outline only), **medium transparency**, or **opaque**. The text tool shows text colour swatches, background choices, and the text-size buttons. The blur tool has no styling, so the bar hides while it is active. The fill level never changes the square’s border, which is always fully opaque. Changes apply to the selected annotation (or to the next one if nothing is selected) and are remembered between launches.
+As soon as a drawing tool is selected, an options bar appears at the top-right and shows only that tool’s controls. The arrow tool shows colour swatches and line thickness buttons. The square tool shows the same colour and thickness controls plus a rounded-corner toggle and three fill buttons: **full transparency** (outline only), **medium transparency**, or **opaque**. The highlight tool shows colour swatches and thickness buttons for the marker. The text tool shows text colour swatches, background choices, and the text-size buttons. The blur tool has no styling, so the bar hides while it is active. The fill level never changes the square’s border, which is always fully opaque. Changes apply to the selected annotation (or to the next one if nothing is selected) and are remembered between launches.
 
 The canvas has a checkerboard work area around the image, so annotations can start or end outside the capture. The image and the annotations together are treated as the content: they are fitted at up to 1:1 into the window with a checkerboard border on every side. Smaller captures therefore get a larger grey area. The zoom then stays wherever you put it; adding or moving annotations never zooms the view. This zoom is visual only; Copy and Save always use the content’s real pixel size regardless of the zoom level.
 

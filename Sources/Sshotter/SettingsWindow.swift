@@ -229,7 +229,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         versionLabel.alignment = .center
 
         let description = NSTextField(
-            wrappingLabelWithString: "A lightweight, native macOS menu bar screenshot utility. Capture an area and mark it up with arrows, shapes, text, and blur."
+            wrappingLabelWithString: "A lightweight, native macOS menu bar screenshot utility. Capture an area and mark it up with arrows, shapes, highlights, text, and blur."
         )
         description.font = NSFont.systemFont(ofSize: 12)
         description.alignment = .center
