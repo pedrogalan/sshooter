@@ -3,16 +3,21 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_PATH="${1:-$PROJECT_DIR/dist/sShooter.app}"
+BINARY="${SSHOOTER_BINARY:-$PROJECT_DIR/.build/release/sshooter}"
 CONTENTS_PATH="$APP_PATH/Contents"
 RESOURCES_PATH="$CONTENTS_PATH/Resources"
 
 cd "$PROJECT_DIR"
-swift build --configuration release
+# Skip the local build when a prebuilt executable is supplied (used by
+# Scripts/build-release.sh to package the universal binary).
+if [ -z "${SSHOOTER_BINARY:-}" ]; then
+    swift build --configuration release
+fi
 
 mkdir -p "$CONTENTS_PATH/MacOS"
 rm -rf "$RESOURCES_PATH"
 mkdir -p "$RESOURCES_PATH"
-cp "$PROJECT_DIR/.build/release/sshooter" "$CONTENTS_PATH/MacOS/sShooter"
+cp "$BINARY" "$CONTENTS_PATH/MacOS/sShooter"
 chmod 755 "$CONTENTS_PATH/MacOS/sShooter"
 cp "$PROJECT_DIR/Assets/MenuBarIcon.png" "$RESOURCES_PATH/MenuBarIcon.png"
 
@@ -49,7 +54,7 @@ cat > "$CONTENTS_PATH/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>LSUIElement</key>
