@@ -45,10 +45,13 @@ Always run `swift build` after making changes to verify the project compiles cle
 
 Use an annotated version tag such as `v1.0.0`. Keep the app name `sShooter.app` unchanged.
 
-1. Remove the temporary **"Blank Canvas (Debug)"** menu item and its `showBlankCanvas(_:)` action in `Sources/Sshotter/App.swift`, plus the `showBlankCanvas()` method in `Sources/Sshotter/ScreenCapture.swift`. Confirm no temporary debug code remains:
+1. Confirm the dev-only **"Blank Canvas (Debug)"** menu is compiled out of release builds. `SSHOOTER_DEBUG_MENU` is defined only for the `.debug` configuration in `Package.swift`; `Scripts/build-app.sh` always builds `.release`, so the menu is available with `swift run` during development and absent from shipped bundles. No source removal is needed. After building, verify the shipped binary does not contain it:
 
    ```bash
-   grep -rn "TEMPORARY\|Blank Canvas (Debug)\|showBlankCanvas" Sources
+   if strings dist/sShooter.app/Contents/MacOS/sShooter | grep -Fq "Blank Canvas (Debug)"; then
+     echo "ERROR: debug menu leaked into the release build" >&2
+     exit 1
+   fi
    ```
 
 2. Start from a clean, up-to-date `master` branch and confirm that the release tag and GitHub release do not already exist.

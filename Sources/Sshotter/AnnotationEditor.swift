@@ -448,7 +448,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         toolTip: "Square tool: drag on the canvas to mark an area. Click again to stop drawing."
     )
     private let blurButton = ToolStripButton(
-        symbolName: "camera.filters",
+        resourceName: "BlurToolIcon",
         toolTip: "Blur tool: drag over an area to blur it. Click again to stop drawing."
     )
     private let pencilButton = ToolStripButton(
@@ -847,11 +847,42 @@ private final class ToolStripButton: HoverButton {
     private var isPressed = false
 
     init(symbolName: String, toolTip: String) {
-        super.init(frame: .zero)
-        self.toolTip = toolTip
         let configuration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-        image = NSImage(systemSymbolName: symbolName, accessibilityDescription: toolTip)?
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: toolTip)?
             .withSymbolConfiguration(configuration)
+        image?.isTemplate = true
+        super.init(frame: .zero)
+        configure(image: image, toolTip: toolTip)
+    }
+
+    init(resourceName: String, toolTip: String) {
+        let image = Self.toolbarImage(named: resourceName) ?? Self.fallbackBlurImage(toolTip: toolTip)
+        super.init(frame: .zero)
+        configure(image: image, toolTip: toolTip)
+    }
+
+    private static func toolbarImage(named name: String) -> NSImage? {
+        let url = Bundle.main.url(forResource: name, withExtension: "png")
+            ?? Bundle.module.url(forResource: name, withExtension: "png")
+        guard let url,
+              let source = NSImage(contentsOf: url),
+              let bitmap = source.representations.first as? NSBitmapImageRep,
+              let cgImage = bitmap.cgImage else { return nil }
+        let image = NSImage(cgImage: cgImage, size: NSSize(width: 15, height: 15))
+        image.isTemplate = true
+        return image
+    }
+
+    private static func fallbackBlurImage(toolTip: String) -> NSImage? {
+        let image = NSImage(systemSymbolName: "camera.filters", accessibilityDescription: toolTip)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 15, weight: .regular))
+        image?.isTemplate = true
+        return image
+    }
+
+    private func configure(image: NSImage?, toolTip: String) {
+        self.toolTip = toolTip
+        self.image = image
         imageScaling = .scaleProportionallyDown
         imagePosition = .imageOnly
         contentTintColor = .labelColor

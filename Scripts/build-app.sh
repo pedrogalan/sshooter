@@ -20,6 +20,7 @@ mkdir -p "$RESOURCES_PATH"
 cp "$BINARY" "$CONTENTS_PATH/MacOS/sShooter"
 chmod 755 "$CONTENTS_PATH/MacOS/sShooter"
 cp "$PROJECT_DIR/Assets/MenuBarIcon.png" "$RESOURCES_PATH/MenuBarIcon.png"
+cp "$PROJECT_DIR/Sources/Sshotter/Resources/BlurToolIcon.png" "$RESOURCES_PATH/BlurToolIcon.png"
 
 # Build an .icns from the source PNG. CFBundleIconFile, the Dock, Cmd-Tab, and
 # Finder all expect an .icns rather than a raw PNG.

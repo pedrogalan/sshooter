@@ -230,6 +230,27 @@ final class CaptureModel {
         editorWindow.reopen()
     }
 
+#if SSHOOTER_DEBUG_MENU
+    /// Dev-only blank canvas for exercising the annotation tools without a
+    /// screen capture. Compiled out of release builds by Package.swift.
+    func showBlankCanvas() {
+        let size = CGSize(width: 1280, height: 800)
+        guard let context = CGContext(
+            data: nil,
+            width: Int(size.width),
+            height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return }
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(CGRect(origin: .zero, size: size))
+        guard let image = context.makeImage() else { return }
+        showEditor(with: image, autoSave: false)
+    }
+#endif
+
     private func copyToClipboard(_ image: NSImage) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()

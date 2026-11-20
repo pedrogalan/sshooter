@@ -79,6 +79,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
 
         menu.addItem(.separator())
 
+#if SSHOOTER_DEBUG_MENU
+        // Dev-only: compiled into debug builds by Package.swift so the
+        // annotation UI can be opened without Screen Recording permission.
+        let blankCanvasItem = NSMenuItem(
+            title: "Blank Canvas (Debug)",
+            action: #selector(showBlankCanvas(_:)),
+            keyEquivalent: ""
+        )
+        blankCanvasItem.target = self
+        menu.addItem(blankCanvasItem)
+
+        menu.addItem(.separator())
+#endif
+
         let quitItem = NSMenuItem(
             title: "Quit",
             action: #selector(quit(_:)),
@@ -229,6 +243,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     @objc private func closeEditor(_ sender: Any?) {
         CaptureModel.shared.closeEditor()
     }
+
+#if SSHOOTER_DEBUG_MENU
+    @objc private func showBlankCanvas(_ sender: Any?) {
+        CaptureModel.shared.showBlankCanvas()
+    }
+#endif
 
     @objc private func quit(_ sender: Any?) {
         NSApp.terminate(nil)
