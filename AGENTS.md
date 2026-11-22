@@ -41,11 +41,24 @@ The build is ad-hoc signed because the project does not have an Apple Developer 
 
 Always run `swift build` after making changes to verify the project compiles cleanly, and fix any compiler errors right away.
 
+### Local debug bundles
+
+Whenever you build a bundle for local development or feature testing, package the **debug** executable so the `SSHOOTER_DEBUG_MENU` flag is compiled in and development-only affordances such as **Blank Canvas (Debug)** are available:
+
+```bash
+swift build
+SSHOOTER_BINARY=.build/debug/sshooter ./Scripts/build-app.sh dist/debug/sShooter.app
+```
+
+The flag is defined by `Package.swift` for the `.debug` configuration; `SSHOOTER_BINARY` selects that debug binary. Do not package `.build/release/sshooter` for local feature testing, and never use a debug binary for release archives.
+
+Always build local debug bundles into `dist/debug/sShooter.app` and overwrite it rather than creating numbered copies such as `sShooter 2.app`. In every response where a local debug build is relevant, include a clickable link to open it directly: [Open debug app](file:///Users/pedrogalan/dev/apps/sshooter/dist/debug/sShooter.app).
+
 ## Release procedure
 
 Use an annotated version tag such as `v1.0.0`. Keep the app name `sShooter.app` unchanged.
 
-1. Confirm the dev-only **"Blank Canvas (Debug)"** menu is compiled out of release builds. `SSHOOTER_DEBUG_MENU` is defined only for the `.debug` configuration in `Package.swift`; `Scripts/build-app.sh` always builds `.release`, so the menu is available with `swift run` during development and absent from shipped bundles. No source removal is needed. After building, verify the shipped binary does not contain it:
+1. Confirm the dev-only **"Blank Canvas (Debug)"** menu is compiled out of release builds. `SSHOOTER_DEBUG_MENU` is defined only for the `.debug` configuration in `Package.swift`; `Scripts/build-app.sh` builds `.release` unless `SSHOOTER_BINARY` points at a debug binary, so the menu is available with `swift run` and in local debug bundles during development, and absent from shipped bundles. No source removal is needed. After building, verify the shipped binary does not contain it:
 
    ```bash
    if strings dist/sShooter.app/Contents/MacOS/sShooter | grep -Fq "Blank Canvas (Debug)"; then

@@ -12,7 +12,9 @@ let package = Package(
             name: "sshooter",
             path: "Sources/Sshotter",
             resources: [
-                .copy("Resources/BlurToolIcon.png")
+                .copy("Resources/BlurToolIcon.png"),
+                .copy("Resources/DueDate.ttf"),
+                .copy("Resources/DueDate-LICENSE.txt")
             ],
             swiftSettings: [
                 // Development-only affordances, such as the blank-canvas menu

@@ -21,6 +21,8 @@ cp "$BINARY" "$CONTENTS_PATH/MacOS/sShooter"
 chmod 755 "$CONTENTS_PATH/MacOS/sShooter"
 cp "$PROJECT_DIR/Assets/MenuBarIcon.png" "$RESOURCES_PATH/MenuBarIcon.png"
 cp "$PROJECT_DIR/Sources/Sshotter/Resources/BlurToolIcon.png" "$RESOURCES_PATH/BlurToolIcon.png"
+cp "$PROJECT_DIR/Sources/Sshotter/Resources/DueDate.ttf" "$RESOURCES_PATH/DueDate.ttf"
+cp "$PROJECT_DIR/Sources/Sshotter/Resources/DueDate-LICENSE.txt" "$RESOURCES_PATH/DueDate-LICENSE.txt"
 
 # Build an .icns from the source PNG. CFBundleIconFile, the Dock, Cmd-Tab, and
 # Finder all expect an .icns rather than a raw PNG.
@@ -55,9 +57,9 @@ cat > "$CONTENTS_PATH/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.4.0</string>
+	<string>1.5.0</string>
 	<key>CFBundleVersion</key>
-	<string>5</string>
+	<string>6</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>LSMinimumSystemVersion</key>

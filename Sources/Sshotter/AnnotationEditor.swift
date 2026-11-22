@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import CoreImage
+import CoreText
 
 // MARK: - Arrow style
 
@@ -52,6 +53,7 @@ enum AnnotationTool {
     case pencil
     case highlight
     case text
+    case stamp
 }
 
 /// The two freehand tools share one stroke model and the same smoothing. They
@@ -313,6 +315,77 @@ enum TextPreferences {
     }
 }
 
+enum StampPreferences {
+    private static let colorKey = "stampColor"
+
+    static var color: ArrowColor {
+        get {
+            let defaults = UserDefaults.standard
+            guard defaults.object(forKey: colorKey) != nil,
+                  let value = ArrowColor(rawValue: defaults.integer(forKey: colorKey)) else {
+                return .red
+            }
+            return value
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: colorKey)
+        }
+    }
+}
+
+/// The bundled stamp face is registered once per process. The license file
+/// ships beside the font in the app bundle.
+private enum StampFont {
+    static let postScriptName = "DueDate"
+
+    static let registration: Void = {
+        let url = Bundle.main.url(forResource: "DueDate", withExtension: "ttf")
+            ?? Bundle.module.url(forResource: "DueDate", withExtension: "ttf")
+        guard let url else { return }
+        CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+    }()
+
+    static func font(ofSize size: CGFloat) -> NSFont {
+        _ = registration
+        return NSFont(name: postScriptName, size: size)
+            ?? .systemFont(ofSize: size, weight: .bold)
+    }
+}
+
+enum StampGeometry {
+    /// Stamps start horizontal; any tilt is chosen afterwards with the handle.
+    static let defaultRotationDegrees: CGFloat = 0
+    static let minimumRotationDegrees: CGFloat = -90
+    static let maximumRotationDegrees: CGFloat = 90
+    /// Single-click placement uses view-point dimensions so the stamp looks the
+    /// same size whatever zoom level the capture is at.
+    static let clickWidthPoints: CGFloat = 220
+    static let clickHeightPoints: CGFloat = 88
+    static let cornerRadiusRatio: CGFloat = 0.08
+    static let borderRatio: CGFloat = 0.045
+    static let minimumWidth: CGFloat = 72
+    static let minimumHeight: CGFloat = 36
+
+    static func clampedRotationDegrees(_ value: CGFloat) -> CGFloat {
+        min(max(value, minimumRotationDegrees), maximumRotationDegrees)
+    }
+}
+
+/// Stable pseudo-randomness for a stamp's worn-ink texture. The seed lives on
+/// the stamp so moving or re-rendering it never makes the defects shimmer.
+private struct StampWearRandom {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        state = seed == 0 ? 1 : seed
+    }
+
+    mutating func nextDouble() -> Double {
+        state = state &* 6364136223846793005 &+ 1442695040888963407
+        return Double(state >> 11) / 9007199254740992.0
+    }
+}
+
 enum ArrowGeometry {
     /// Continuous stroke-width range, as multiples of the base stroke. Arrows
     /// and squares share it. The narrow end is twice the old thinnest preset and
@@ -463,6 +536,10 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         symbolName: "character.cursor.ibeam",
         toolTip: "Text tool: click the canvas to add text. Drag text to move it; double-click to edit."
     )
+    private let stampButton = ToolStripButton(
+        symbolName: "checkmark.seal",
+        toolTip: "Stamp tool: click to place a stamp or drag to size it. Resize and rotate it with the handles."
+    )
     private let cropButton = ToolStripButton(
         symbolName: "crop",
         toolTip: "Crop tool: drag to choose the area to keep, then press Return to crop."
@@ -556,7 +633,12 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         textButton.action = #selector(toggleTextTool(_:))
         toolStrip.addSubview(textButton)
 
-        cropButton.frame = NSRect(x: 414, y: 8, width: 40, height: 32)
+        stampButton.frame = NSRect(x: 414, y: 8, width: 40, height: 32)
+        stampButton.target = self
+        stampButton.action = #selector(toggleStampTool(_:))
+        toolStrip.addSubview(stampButton)
+
+        cropButton.frame = NSRect(x: 458, y: 8, width: 40, height: 32)
         cropButton.target = self
         cropButton.action = #selector(toggleCropTool(_:))
         toolStrip.addSubview(cropButton)
@@ -636,6 +718,10 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         toggleTool(.text)
     }
 
+    @objc private func toggleStampTool(_ sender: Any?) {
+        toggleTool(.stamp)
+    }
+
     @objc private func toggleCropTool(_ sender: Any?) {
         if canvas.isCropping {
             canvas.cancelCropSession()
@@ -686,6 +772,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         pencilButton.setActive(tool == .pencil && !cropping)
         highlightButton.setActive(tool == .highlight && !cropping)
         textButton.setActive(tool == .text && !cropping)
+        stampButton.setActive(tool == .stamp && !cropping)
         cropButton.setActive(cropping)
     }
 
@@ -715,6 +802,10 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         if event.keyCode == 53 {
             if canvas.isEditingText {
                 canvas.commitActiveTextEditing()
+                return true
+            }
+            if canvas.isEditingStamp {
+                canvas.cancelStampEditing()
                 return true
             }
             if canvas.handleEscape() { return true }
@@ -748,6 +839,7 @@ final class AnnotationEditorWindow: NSWindow, NSWindowDelegate {
         // Keep the capture, annotations, title, and camera intact so the status
         // menu can reopen the editor exactly where it was left.
         canvas.commitTextEditing()
+        canvas.commitStampEditing()
         onClose()
     }
 
@@ -1004,7 +1096,7 @@ private final class StrokeWidthGlyph: NSView {
 /// Draws a solid accent-coloured knob with a darker rim. The stock slider knob
 /// is a very light grey that is hard to pick out against the panel, especially
 /// at the small control size this slider uses.
-private final class StrokeWidthSliderCell: NSSliderCell {
+private final class TrackingSliderCell: NSSliderCell {
     override func drawKnob(_ knobRect: NSRect) {
         let diameter = min(knobRect.width, knobRect.height)
         let rect = NSRect(
@@ -1028,13 +1120,13 @@ private final class StrokeWidthSliderCell: NSSliderCell {
 /// An `NSSlider` that reports when a drag begins and ends, so the canvas can
 /// register a single undo step for a whole drag instead of one per tick.
 @MainActor
-private final class StrokeWidthSlider: NSSlider {
+private final class TrackingSlider: NSSlider {
     var onTrackingBegan: (() -> Void)?
     var onTrackingEnded: (() -> Void)?
 
     init() {
         super.init(frame: .zero)
-        cell = StrokeWidthSliderCell()
+        cell = TrackingSliderCell()
         isContinuous = true
     }
 
@@ -1237,6 +1329,7 @@ private final class ArrowOptionsPanel: NSView {
         case pencil
         case highlight
         case text
+        case stamp
     }
 
     private static let swatchSize: CGFloat = 22
@@ -1264,6 +1357,7 @@ private final class ArrowOptionsPanel: NSView {
     var onTextColorSelected: (@MainActor (ArrowColor) -> Void)?
     var onBackgroundSelected: (@MainActor (TextBackground) -> Void)?
     var onTextSizeChanged: (@MainActor (Bool) -> Void)?
+    var onStampColorSelected: (@MainActor (ArrowColor) -> Void)?
 
     private(set) var mode: Mode = .arrow
     private var swatchButtons: [ColorSwatchButton] = []
@@ -1275,7 +1369,7 @@ private final class ArrowOptionsPanel: NSView {
     private var backgroundButtons: [BackgroundSwatchButton] = []
     private var sizeDecreaseButton = TextSizeButton(increase: false)
     private var sizeIncreaseButton = TextSizeButton(increase: true)
-    private let widthSlider = StrokeWidthSlider()
+    private let widthSlider = TrackingSlider()
     private let thinGlyph = StrokeWidthGlyph(previewWidth: ArrowOptionsPanel.thinPreviewWidth)
     private let thickGlyph = StrokeWidthGlyph(previewWidth: ArrowOptionsPanel.thickPreviewWidth)
     private var isAdjustingWidth = false
@@ -1289,6 +1383,7 @@ private final class ArrowOptionsPanel: NSView {
     private var highlightWidth = FreehandPreferences.lineWidth(for: .highlight)
     private var textColor = TextPreferences.color
     private var textBackground = TextPreferences.background
+    private var stampColor = StampPreferences.color
 
     override var isFlipped: Bool { false }
 
@@ -1327,6 +1422,8 @@ private final class ArrowOptionsPanel: NSView {
         switch mode {
         case .text:
             color = textColor
+        case .stamp:
+            color = stampColor
         case .pencil:
             color = pencilColor
         case .highlight:
@@ -1356,7 +1453,7 @@ private final class ArrowOptionsPanel: NSView {
             widthSlider.minValue = Double(FreehandGeometry.minimumMultiplier)
             widthSlider.maxValue = Double(FreehandGeometry.maximumMultiplier)
             widthSlider.doubleValue = Double(highlightWidth)
-        case .text:
+        case .text, .stamp:
             break
         }
     }
@@ -1611,6 +1708,14 @@ private final class ArrowOptionsPanel: NSView {
         }
     }
 
+    func updateStampSelection(color: ArrowColor) {
+        stampColor = color
+        guard mode == .stamp else { return }
+        for button in swatchButtons {
+            button.setSelected(button.tag == color.rawValue)
+        }
+    }
+
     @objc private func toggleRounded(_ sender: Any?) {
         isRounded.toggle()
         roundedButton.setSelected(isRounded)
@@ -1630,6 +1735,9 @@ private final class ArrowOptionsPanel: NSView {
         if mode == .text {
             updateTextSelection(color: color, background: textBackground)
             onTextColorSelected?(color)
+        } else if mode == .stamp {
+            updateStampSelection(color: color)
+            onStampColorSelected?(color)
         } else if mode == .pencil {
             updatePencilSelection(color: color, width: pencilWidth)
             onPencilColorSelected?(color)
@@ -1660,7 +1768,7 @@ private final class ArrowOptionsPanel: NSView {
             pencilWidth = width
         case .highlight:
             highlightWidth = width
-        case .text:
+        case .text, .stamp:
             break
         }
         if isAdjustingWidth {
@@ -1750,12 +1858,29 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         var background: TextBackground
     }
 
+    /// A rotated stamp. `rect` is the unrotated frame in image units; `rotation`
+    /// is stored per stamp so each one keeps its angle through undo and export.
+    private struct Stamp: Equatable {
+        var text: String
+        var rect: CGRect
+        var color: ArrowColor
+        var rotation: CGFloat = StampGeometry.defaultRotationDegrees
+        var wearSeed: UInt64 = UInt64.random(in: 1...UInt64.max)
+
+        func withText(_ newText: String) -> Stamp {
+            var copy = self
+            copy.text = newText
+            return copy
+        }
+    }
+
     private struct AnnotationSnapshot: Equatable {
         var arrows: [Arrow]
         var squares: [Square]
         var blurRegions: [BlurRegion]
         var strokes: [FreehandStroke]
         var textNotes: [TextNote]
+        var stamps: [Stamp]
         var cropRect: CGRect?
     }
 
@@ -1765,6 +1890,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case blur(Int)
         case stroke(Int)
         case text(Int)
+        case stamp(Int)
     }
 
     private enum SquareCorner {
@@ -1806,6 +1932,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case drawingArrow(start: CGPoint)
         case drawingSquare(start: CGPoint)
         case drawingBlur(start: CGPoint)
+        case drawingStamp(start: CGPoint)
         case drawingStroke
         case moving(index: Int, original: Arrow, grabOffset: CGPoint)
         case movingSquare(index: Int, original: Square, grabOffset: CGPoint)
@@ -1816,6 +1943,9 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case resizingSquare(index: Int, original: CGRect, corner: SquareCorner)
         case resizingBlur(index: Int, original: CGRect, corner: SquareCorner)
         case movingText(index: Int, original: TextNote, grabOffset: CGPoint)
+        case movingStamp(index: Int, original: Stamp, grabOffset: CGPoint)
+        case resizingStamp(index: Int, original: Stamp, corner: SquareCorner)
+        case rotatingStamp(index: Int, original: Stamp, startAngle: CGFloat, originalRotation: CGFloat)
     }
 
     private enum HitTarget {
@@ -1828,6 +1958,9 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case blurBody(Int)
         case strokeBody(Int)
         case textBody(Int)
+        case stampBody(Int)
+        case stampCorner(Int, SquareCorner)
+        case stampRotationHandle(Int)
     }
 
     private let handleRadius: CGFloat = 6
@@ -1844,6 +1977,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var blurRegions: [BlurRegion] = []
     private var strokes: [FreehandStroke] = []
     private var textNotes: [TextNote] = []
+    private var stamps: [Stamp] = []
     private var selection: Selection?
     private var dragMode: DragMode?
     private var pointerPosition: CGPoint?
@@ -1860,15 +1994,23 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var currentTextColor = TextPreferences.color
     private var currentTextBackground = TextPreferences.background
     private var currentTextScale = TextPreferences.scale
+    private var currentStampColor = StampPreferences.color
     private var textEditor: NSTextField?
     private var editingTextIndex: Int?
     private var lastObservedEditingText = ""
     private var textCreationUndoSnapshot: AnnotationSnapshot?
     private var ignoreNextMouseDownAfterTextCommit = false
     private var isPreparingTextEditor = false
+    private var stampEditor: NSTextField?
+    private var editingStampIndex: Int?
+    private var lastObservedEditingStampText = ""
+    private var stampCreationUndoSnapshot: AnnotationSnapshot?
+    private var ignoreNextMouseDownAfterStampCommit = false
+    private var isPreparingStampEditor = false
     private let annotationUndoManager = UndoManager()
     private var dragUndoSnapshot: AnnotationSnapshot?
     private var didDragAnnotation = false
+    private var didRotateStamp = false
     private var trackingArea: NSTrackingArea?
     private let optionsPanel = ArrowOptionsPanel()
     private var blurredScreenshot: CGImage?
@@ -1930,11 +2072,15 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         optionsPanel.onTextSizeChanged = { [weak self] increase in
             self?.adjustTextSize(increase: increase)
         }
+        optionsPanel.onStampColorSelected = { [weak self] color in
+            self?.applyStampColor(color)
+        }
         optionsPanel.updateSelection(color: currentColor, width: currentThickness)
         optionsPanel.updateSquareSelection(isRounded: currentRounded, fill: currentFill)
         optionsPanel.updatePencilSelection(color: currentPencilColor, width: currentPencilWidth)
         optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
+        optionsPanel.updateStampSelection(color: currentStampColor)
         addSubview(optionsPanel)
     }
 
@@ -1948,6 +2094,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     func setImage(_ image: CGImage) {
         commitTextEditing()
+        commitStampEditing()
         annotationUndoManager.removeAllActions()
         screenshot = image
         screenshotImage = NSImage(
@@ -1965,11 +2112,13 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         currentTextColor = TextPreferences.color
         currentTextBackground = TextPreferences.background
         currentTextScale = TextPreferences.scale
+        currentStampColor = StampPreferences.color
         arrows.removeAll()
         squares.removeAll()
         blurRegions.removeAll()
         strokes.removeAll()
         textNotes.removeAll()
+        stamps.removeAll()
         blurredScreenshot = nil
         blurredScreenshotImage = nil
         selection = nil
@@ -1984,6 +2133,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         optionsPanel.updatePencilSelection(color: currentPencilColor, width: currentPencilWidth)
         optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
+        optionsPanel.updateStampSelection(color: currentStampColor)
         updateOptionsVisibility(animated: false)
         fitCameraToContent()
         needsDisplay = true
@@ -1996,6 +2146,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             blurRegions: blurRegions,
             strokes: strokes,
             textNotes: textNotes,
+            stamps: stamps,
             cropRect: cropRect
         )
     }
@@ -2004,12 +2155,16 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         if editingTextIndex != nil {
             endTextEditing(makeCanvasFirstResponder: false)
         }
+        if editingStampIndex != nil {
+            endStampEditing(makeCanvasFirstResponder: false)
+        }
         let cropChanged = snapshot.cropRect != cropRect
         arrows = snapshot.arrows
         squares = snapshot.squares
         blurRegions = snapshot.blurRegions
         strokes = snapshot.strokes
         textNotes = snapshot.textNotes
+        stamps = snapshot.stamps
         cropRect = snapshot.cropRect
         cropSession = nil
         selection = nil
@@ -2022,6 +2177,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         optionsPanel.updatePencilSelection(color: currentPencilColor, width: currentPencilWidth)
         optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
+        optionsPanel.updateStampSelection(color: currentStampColor)
         updateOptionsVisibility()
         if cropChanged {
             fitCameraToContent()
@@ -2046,6 +2202,11 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     func undoAnnotationOrTextEdit(redo: Bool) {
         if redo {
             if annotationUndoManager.canRedo { annotationUndoManager.redo() }
+        } else if editingStampIndex != nil {
+            // A stamp edit is one undoable unit that is registered on commit,
+            // so ⌘Z while typing discards the edit instead of reaching back to
+            // an unrelated earlier annotation.
+            cancelStampEditing()
         } else if annotationUndoManager.canUndo {
             annotationUndoManager.undo()
         } else if editingTextIndex != nil {
@@ -2055,6 +2216,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     func setTool(_ tool: AnnotationTool?) {
         commitTextEditing()
+        commitStampEditing()
         activeTool = tool
         dragMode = nil
         pointerPosition = nil
@@ -2068,6 +2230,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         optionsPanel.updatePencilSelection(color: currentPencilColor, width: currentPencilWidth)
         optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
+        optionsPanel.updateStampSelection(color: currentStampColor)
         updateOptionsVisibility()
         window?.invalidateCursorRects(for: self)
         updateCursor(at: .zero)
@@ -2084,6 +2247,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     func beginCropSession() {
         guard screenshot != nil, cropSession == nil else { return }
         commitTextEditing()
+        commitStampEditing()
         selection = nil
         dragMode = nil
         pointerPosition = nil
@@ -2404,6 +2568,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         )
 
         positionTextEditor()
+        positionStampEditor()
 
         // Fit once, as soon as the canvas has a real size. After that the
         // camera only moves through manual zoom/pan or an explicit fit, so
@@ -2518,6 +2683,26 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             )
         }
 
+        // Stamps sit above the other shapes but below text notes, which stay
+        // readable even when a stamp is placed over them. While editing, the
+        // frame stays on canvas but its lettering comes from the text field.
+        for (index, stamp) in stamps.enumerated() {
+            let drawn = index == editingStampIndex ? stamp.withText("") : stamp
+            drawStamp(drawn, transform: { self.contentToView($0) }, scale: scale)
+        }
+        if let pointerPosition, case .drawingStamp(let start)? = dragMode {
+            drawStamp(
+                Stamp(
+                    text: "",
+                    rect: normalizedStampRect(from: start, to: pointerPosition),
+                    color: currentStampColor,
+                    wearSeed: 0
+                ),
+                transform: { self.contentToView($0) },
+                scale: scale
+            )
+        }
+
         // Text sits above every shape annotation so it stays legible.
         for (index, note) in textNotes.enumerated() where index != editingTextIndex {
             drawTextNote(
@@ -2538,6 +2723,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             drawHandles(for: arrows[index])
         } else if case .blur(let index)? = selection, blurRegions.indices.contains(index) {
             drawHandles(for: blurRegions[index])
+        } else if case .stamp(let index)? = selection, stamps.indices.contains(index) {
+            drawHandles(for: stamps[index])
         } else if case .stroke(let index)? = selection, strokes.indices.contains(index) {
             drawHandles(for: strokes[index])
         } else if case .text(let index)? = selection, textNotes.indices.contains(index),
@@ -2606,6 +2793,366 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         square.color.nsColor.setStroke()
         path.lineWidth = lineWidth
         path.stroke()
+    }
+
+    // MARK: Stamps
+
+    /// Keeps tiny drags usable instead of producing a sliver the text cannot fit.
+    private func normalizedStampRect(from start: CGPoint, to end: CGPoint) -> CGRect {
+        var rect = normalizedRect(from: start, to: end)
+        if rect.width < StampGeometry.minimumWidth {
+            let expansion = (StampGeometry.minimumWidth - rect.width) / 2
+            rect = rect.insetBy(dx: -expansion, dy: 0)
+        }
+        if rect.height < StampGeometry.minimumHeight {
+            let expansion = (StampGeometry.minimumHeight - rect.height) / 2
+            rect = rect.insetBy(dx: 0, dy: -expansion)
+        }
+        return rect
+    }
+
+    /// A click, rather than a drag, drops a sensibly sized stamp centred on the
+    /// pointer. Dimensions are view points divided by zoom so the on-screen size
+    /// stays consistent at any zoom level.
+    private func defaultStampRect(centeredAt point: CGPoint) -> CGRect {
+        let width = max(StampGeometry.minimumWidth, StampGeometry.clickWidthPoints / cameraScale)
+        let height = max(StampGeometry.minimumHeight, StampGeometry.clickHeightPoints / cameraScale)
+        return CGRect(
+            x: point.x - width / 2,
+            y: point.y - height / 2,
+            width: width,
+            height: height
+        )
+    }
+
+    /// Resizes the unrotated frame while keeping the opposite corner pinned.
+    /// `point` is already in the stamp's unrotated local coordinates.
+    private func resizedStampRect(
+        from original: Stamp,
+        corner: SquareCorner,
+        to point: CGPoint
+    ) -> CGRect {
+        var rect = resizedRect(original.rect, corner: corner, to: point)
+
+        let fixedX: CGFloat
+        let pinsMaxX: Bool
+        switch corner {
+        case .topLeft, .bottomLeft:
+            fixedX = original.rect.maxX
+            pinsMaxX = true
+        case .topRight, .bottomRight:
+            fixedX = original.rect.minX
+            pinsMaxX = false
+        }
+
+        let fixedY: CGFloat
+        let pinsMaxY: Bool
+        switch corner {
+        case .topLeft, .topRight:
+            fixedY = original.rect.maxY
+            pinsMaxY = true
+        case .bottomLeft, .bottomRight:
+            fixedY = original.rect.minY
+            pinsMaxY = false
+        }
+
+        if rect.width < StampGeometry.minimumWidth {
+            if pinsMaxX {
+                rect.origin.x = fixedX - StampGeometry.minimumWidth
+            } else {
+                rect.size.width = StampGeometry.minimumWidth
+            }
+        }
+        if rect.height < StampGeometry.minimumHeight {
+            if pinsMaxY {
+                rect.origin.y = fixedY - StampGeometry.minimumHeight
+            } else {
+                rect.size.height = StampGeometry.minimumHeight
+            }
+        }
+        return rect
+    }
+
+    private func stampFont(for stamp: Stamp, scale: CGFloat = 1) -> NSFont {
+        let rect = stamp.rect
+        let availableWidth = max(1, rect.width * scale * 0.90)
+        let availableHeight = max(1, rect.height * scale * 0.68)
+        var size = min(availableHeight, max(6, rect.width * scale * 0.16))
+        let measured = textSize(for: stamp.text, font: stampFont(ofSize: size))
+        if measured.width > availableWidth {
+            size *= availableWidth / measured.width
+        }
+        if measured.height > availableHeight {
+            size *= availableHeight / measured.height
+        }
+        return stampFont(ofSize: max(1, size))
+    }
+
+    private func stampFont(ofSize size: CGFloat) -> NSFont {
+        StampFont.font(ofSize: size)
+    }
+
+    /// Draws a stamp in either view or export coordinates. The artwork is
+    /// rendered to a small transparent bitmap first so the worn-ink mask can
+    /// remove parts of the stamp without erasing the screenshot underneath.
+    private func drawStamp(
+        _ stamp: Stamp,
+        transform: (CGPoint) -> CGPoint,
+        scale: CGFloat
+    ) {
+        let rect = transformedRect(stamp.rect, transform: transform, scale: scale)
+        guard rect.width > 2, rect.height > 2 else { return }
+        guard let mainContext = NSGraphicsContext.current?.cgContext else { return }
+
+        let radians = stamp.rotation * CGFloat.pi / 180
+        let cosine = abs(cos(radians))
+        let sine = abs(sin(radians))
+        let rotatedWidth = rect.width * cosine + rect.height * sine
+        let rotatedHeight = rect.width * sine + rect.height * cosine
+        let padding: CGFloat = 8
+        let drawingRect = CGRect(
+            x: rect.midX - rotatedWidth / 2 - padding,
+            y: rect.midY - rotatedHeight / 2 - padding,
+            width: rotatedWidth + padding * 2,
+            height: rotatedHeight + padding * 2
+        )
+
+        guard let bitmapContext = CGContext(
+            data: nil,
+            width: max(1, Int(drawingRect.width.rounded(.up))),
+            height: max(1, Int(drawingRect.height.rounded(.up))),
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            drawStampArtwork(stamp, rect: rect, scale: scale, in: mainContext)
+            return
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: bitmapContext, flipped: true)
+        bitmapContext.translateBy(x: -drawingRect.origin.x, y: -drawingRect.origin.y)
+        drawStampArtwork(stamp, rect: rect, scale: scale, in: bitmapContext)
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let image = bitmapContext.makeImage() else { return }
+        mainContext.draw(image, in: drawingRect)
+    }
+
+    /// The clean stamp artwork plus its deterministic wear mask, drawn into
+    /// whichever context is currently active. Wear is applied while the context
+    /// is still rotated so defects follow the stamp.
+    private func drawStampArtwork(
+        _ stamp: Stamp,
+        rect: CGRect,
+        scale: CGFloat,
+        in context: CGContext
+    ) {
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        let borderWidth = max(1.5, min(rect.width, rect.height) * StampGeometry.borderRatio)
+
+        context.saveGState()
+        var rotation = CGAffineTransform.identity
+        rotation = rotation.translatedBy(x: center.x, y: center.y)
+        rotation = rotation.rotated(by: stamp.rotation * CGFloat.pi / 180)
+        rotation = rotation.translatedBy(x: -center.x, y: -center.y)
+        context.concatenate(rotation)
+
+        let inset = rect.insetBy(dx: borderWidth / 2, dy: borderWidth / 2)
+        let radius = min(inset.width, inset.height) * StampGeometry.cornerRadiusRatio
+        let outline = NSBezierPath(roundedRect: inset, xRadius: radius, yRadius: radius)
+        NSColor.white.withAlphaComponent(0.82).setFill()
+        outline.fill()
+        stamp.color.nsColor.setStroke()
+        outline.lineWidth = borderWidth
+        outline.stroke()
+
+        let inner = NSBezierPath(
+            roundedRect: inset.insetBy(dx: borderWidth * 1.8, dy: borderWidth * 1.8),
+            xRadius: max(0, radius - borderWidth),
+            yRadius: max(0, radius - borderWidth)
+        )
+        stamp.color.nsColor.withAlphaComponent(0.55).setStroke()
+        inner.lineWidth = max(0.6, borderWidth * 0.18)
+        inner.stroke()
+
+        let font = stampFont(for: stamp, scale: scale)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: stamp.color.nsColor
+        ]
+        let size = textSize(for: stamp.text, font: font)
+        let origin = NSPoint(
+            x: rect.midX - size.width / 2,
+            y: rect.midY - size.height / 2
+        )
+        NSAttributedString(string: stamp.text, attributes: attributes).draw(
+            in: NSRect(origin: origin, size: size)
+        )
+
+        applyStampWear(in: context, rect: rect, seed: stamp.wearSeed)
+        context.restoreGState()
+    }
+
+    /// Punches small transparent flecks and scratches out of the stamp artwork.
+    /// Seed 0 means "no wear", which the in-progress drag preview uses so it
+    /// does not shimmer while the pointer moves.
+    private func applyStampWear(in context: CGContext, rect: CGRect, seed: UInt64) {
+        guard seed != 0 else { return }
+        var random = StampWearRandom(seed: seed)
+        let area = rect.width * rect.height
+        let minimumSide = min(rect.width, rect.height)
+        let speckCount = Int(max(60, min(320, area / 260)))
+
+        context.saveGState()
+        context.setBlendMode(.destinationOut)
+
+        for _ in 0..<speckCount {
+            let x = rect.minX + CGFloat(random.nextDouble()) * rect.width
+            let y = rect.minY + CGFloat(random.nextDouble()) * rect.height
+            let radius = max(
+                0.9,
+                minimumSide * (0.008 + CGFloat(random.nextDouble()) * 0.022)
+            )
+            let alpha = CGFloat(0.55 + random.nextDouble() * 0.45)
+            context.setFillColor(NSColor.black.withAlphaComponent(alpha).cgColor)
+            context.fillEllipse(in: CGRect(
+                x: x - radius,
+                y: y - radius,
+                width: radius * 2,
+                height: radius * 2
+            ))
+        }
+
+        // Chips along the frame break up the otherwise perfect printed outline.
+        let chipCount = Int(max(6, min(28, area / 4200)))
+        for _ in 0..<chipCount {
+            let edge = Int(random.nextDouble() * 4)
+            let position = CGFloat(random.nextDouble())
+            let point: CGPoint
+            switch edge {
+            case 0: point = CGPoint(x: rect.minX + position * rect.width, y: rect.minY)
+            case 1: point = CGPoint(x: rect.maxX, y: rect.minY + position * rect.height)
+            case 2: point = CGPoint(x: rect.minX + position * rect.width, y: rect.maxY)
+            default: point = CGPoint(x: rect.minX, y: rect.minY + position * rect.height)
+            }
+            let width = minimumSide * (0.025 + CGFloat(random.nextDouble()) * 0.05)
+            let height = minimumSide * (0.015 + CGFloat(random.nextDouble()) * 0.03)
+            let alpha = CGFloat(0.7 + random.nextDouble() * 0.3)
+            context.setFillColor(NSColor.black.withAlphaComponent(alpha).cgColor)
+            context.fillEllipse(in: CGRect(
+                x: point.x - width / 2,
+                y: point.y - height / 2,
+                width: width,
+                height: height
+            ))
+        }
+
+        let scratchCount = Int(max(6, min(24, area / 6500)))
+        for _ in 0..<scratchCount {
+            let x = rect.minX + CGFloat(random.nextDouble()) * rect.width
+            let y = rect.minY + CGFloat(random.nextDouble()) * rect.height
+            let length = minimumSide * (0.05 + CGFloat(random.nextDouble()) * 0.09)
+            let alpha = CGFloat(0.5 + random.nextDouble() * 0.5)
+            context.setLineWidth(max(0.9, minimumSide * 0.006))
+            context.setStrokeColor(NSColor.black.withAlphaComponent(alpha).cgColor)
+            context.beginPath()
+            context.move(to: CGPoint(x: x, y: y))
+            context.addLine(to: CGPoint(x: x + length, y: y + length * 0.18))
+            context.strokePath()
+        }
+
+        context.restoreGState()
+    }
+
+    /// Axis-aligned bounds of the rotated stamp, including its border.
+    private func stampBounds(for stamp: Stamp) -> CGRect {
+        let rect = stamp.rect
+        let radians = stamp.rotation * CGFloat.pi / 180
+        let cosine = abs(cos(radians))
+        let sine = abs(sin(radians))
+        let width = rect.width * cosine + rect.height * sine
+        let height = rect.width * sine + rect.height * cosine
+        let padding: CGFloat = 2
+        return CGRect(
+            x: rect.midX - width / 2 - padding,
+            y: rect.midY - height / 2 - padding,
+            width: width + padding * 2,
+            height: height + padding * 2
+        )
+    }
+
+    private func stampContains(_ point: CGPoint, stamp: Stamp) -> Bool {
+        let rect = viewRect(for: stamp.rect).insetBy(dx: -4, dy: -4)
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        let radians = -stamp.rotation * CGFloat.pi / 180
+        let dx = point.x - center.x
+        let dy = point.y - center.y
+        let local = NSPoint(
+            x: center.x + dx * cos(radians) - dy * sin(radians),
+            y: center.y + dx * sin(radians) + dy * cos(radians)
+        )
+        return rect.contains(local)
+    }
+
+    /// The stamp's own rotated corners, in view coordinates and in the same
+    /// order as `cornerPoints(for:)`.
+    private func stampRotatedCorners(for stamp: Stamp) -> [(SquareCorner, CGPoint)] {
+        let rect = viewRect(for: stamp.rect)
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let radians = stamp.rotation * CGFloat.pi / 180
+        let cosine = cos(radians)
+        let sine = sin(radians)
+
+        return cornerPoints(for: rect).map { corner, point in
+            let dx = point.x - center.x
+            let dy = point.y - center.y
+            return (corner, CGPoint(
+                x: center.x + dx * cosine - dy * sine,
+                y: center.y + dx * sine + dy * cosine
+            ))
+        }
+    }
+
+    /// A grab point just outside the rotated top-right corner, connected to it
+    /// by a stem. The resize handle stays on the corner itself.
+    private func stampRotationHandlePoint(for stamp: Stamp) -> CGPoint {
+        let rect = viewRect(for: stamp.rect)
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        guard let corner = stampRotatedCorners(for: stamp).first(where: { $0.0 == .topRight })?.1 else {
+            return center
+        }
+        let dx = corner.x - center.x
+        let dy = corner.y - center.y
+        let length = max(1, hypot(dx, dy))
+        let offset: CGFloat = 18
+        return CGPoint(
+            x: corner.x + dx / length * offset,
+            y: corner.y + dy / length * offset
+        )
+    }
+
+    /// Converts a pointer in view coordinates into the stamp's unrotated local
+    /// frame, so the existing axis-aligned resize maths can be reused.
+    private func stampLocalContentPoint(_ pointInView: CGPoint, for stamp: Stamp) -> CGPoint {
+        let rect = viewRect(for: stamp.rect)
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let radians = -stamp.rotation * CGFloat.pi / 180
+        let dx = pointInView.x - center.x
+        let dy = pointInView.y - center.y
+        let local = CGPoint(
+            x: center.x + dx * cos(radians) - dy * sin(radians),
+            y: center.y + dx * sin(radians) + dy * cos(radians)
+        )
+        return viewToContent(local)
+    }
+
+    /// Pointer angle around the stamp centre, used to turn handle drags into
+    /// rotation deltas without depending on where inside the handle it was grabbed.
+    private func stampAngle(at point: CGPoint, for stamp: Stamp) -> CGFloat {
+        let rect = viewRect(for: stamp.rect)
+        return atan2(point.y - rect.midY, point.x - rect.midX)
     }
 
     private func drawBlur(_ region: BlurRegion) {
@@ -2821,6 +3368,65 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             path.lineWidth = 2
             path.stroke()
         }
+    }
+
+    private func drawHandles(for stamp: Stamp) {
+        let bounds = viewRect(for: stampBounds(for: stamp))
+        let outline = NSBezierPath(rect: bounds.insetBy(dx: -2, dy: -2))
+        outline.setLineDash([4, 3], count: 2, phase: 0)
+        NSColor.controlAccentColor.withAlphaComponent(0.9).setStroke()
+        outline.lineWidth = 1
+        outline.stroke()
+
+        let corners = stampRotatedCorners(for: stamp)
+        for (_, point) in corners {
+            let rect = NSRect(
+                x: point.x - handleRadius,
+                y: point.y - handleRadius,
+                width: handleRadius * 2,
+                height: handleRadius * 2
+            )
+            let knob = NSBezierPath(ovalIn: rect)
+            NSColor.white.setFill()
+            knob.fill()
+            NSColor.controlAccentColor.setStroke()
+            knob.lineWidth = 2
+            knob.stroke()
+        }
+
+        guard let topRight = corners.first(where: { $0.0 == .topRight })?.1 else { return }
+        let handle = stampRotationHandlePoint(for: stamp)
+
+        let stem = NSBezierPath()
+        stem.move(to: topRight)
+        stem.line(to: handle)
+        NSColor.controlAccentColor.withAlphaComponent(0.65).setStroke()
+        stem.lineWidth = 1
+        stem.stroke()
+
+        let handleRect = NSRect(
+            x: handle.x - handleRadius,
+            y: handle.y - handleRadius,
+            width: handleRadius * 2,
+            height: handleRadius * 2
+        )
+        let knob = NSBezierPath(ovalIn: handleRect)
+        NSColor.white.setFill()
+        knob.fill()
+        NSColor.controlAccentColor.setStroke()
+        knob.lineWidth = 2
+        knob.stroke()
+
+        let arc = NSBezierPath()
+        arc.appendArc(
+            withCenter: handle,
+            radius: 3,
+            startAngle: 0.3,
+            endAngle: 2.6,
+            clockwise: false
+        )
+        arc.lineWidth = 1.2
+        arc.stroke()
     }
 
     private func drawHandles(for note: TextNote) {
@@ -3089,36 +3695,54 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     func controlTextDidEndEditing(_ notification: Notification) {
-        guard !isPreparingTextEditor,
-              let field = textEditor,
-              (notification.object as? NSTextField) === field else { return }
-        // AppKit can end field editing before forwarding the same outside
-        // click to this canvas. Treat that click as the commit action only;
-        // it must not also create another text note.
-        if NSApp.currentEvent?.type == .leftMouseDown {
-            ignoreNextMouseDownAfterTextCommit = true
+        guard let field = notification.object as? NSTextField else { return }
+        if field === textEditor {
+            guard !isPreparingTextEditor else { return }
+            // AppKit can end field editing before forwarding the same outside
+            // click to this canvas. Treat that click as the commit action only;
+            // it must not also create another annotation.
+            if NSApp.currentEvent?.type == .leftMouseDown {
+                ignoreNextMouseDownAfterTextCommit = true
+            }
+            commitTextEditing()
+        } else if field === stampEditor {
+            guard !isPreparingStampEditor else { return }
+            if NSApp.currentEvent?.type == .leftMouseDown {
+                ignoreNextMouseDownAfterStampCommit = true
+            }
+            commitStampEditing()
         }
-        commitTextEditing()
     }
 
     func controlTextDidChange(_ notification: Notification) {
-        guard !isPreparingTextEditor,
-              let field = textEditor,
-              (notification.object as? NSTextField) === field else { return }
-        let newText = field.stringValue
-        if newText != lastObservedEditingText,
-           let index = editingTextIndex,
-           textNotes.indices.contains(index) {
-            let previousText = lastObservedEditingText
-            if !newText.isEmpty, let creationSnapshot = textCreationUndoSnapshot {
-                registerAnnotationUndo(restoring: creationSnapshot, actionName: "Add Text")
-                textCreationUndoSnapshot = nil
+        guard let field = notification.object as? NSTextField else { return }
+        if field === textEditor {
+            guard !isPreparingTextEditor else { return }
+            let newText = field.stringValue
+            if newText != lastObservedEditingText,
+               let index = editingTextIndex,
+               textNotes.indices.contains(index) {
+                let previousText = lastObservedEditingText
+                if !newText.isEmpty, let creationSnapshot = textCreationUndoSnapshot {
+                    registerAnnotationUndo(restoring: creationSnapshot, actionName: "Add Text")
+                    textCreationUndoSnapshot = nil
+                }
+                registerTextChange(from: previousText, to: newText, at: index)
+                textNotes[index].text = newText
+                lastObservedEditingText = newText
             }
-            registerTextChange(from: previousText, to: newText, at: index)
-            textNotes[index].text = newText
-            lastObservedEditingText = newText
+            positionTextEditor()
+        } else if field === stampEditor {
+            guard !isPreparingStampEditor else { return }
+            let newText = field.stringValue
+            if newText != lastObservedEditingStampText,
+               let index = editingStampIndex,
+               stamps.indices.contains(index) {
+                stamps[index].text = newText
+                lastObservedEditingStampText = newText
+            }
+            positionStampEditor()
         }
-        positionTextEditor()
         needsDisplay = true
     }
 
@@ -3157,6 +3781,19 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         textView: NSTextView,
         doCommandBy commandSelector: Selector
     ) -> Bool {
+        if let stampEditor, control === stampEditor {
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                cancelStampEditing()
+                return true
+            }
+            // Stamps are single-line, so Return finishes the edit and hands the
+            // stamp back to the selection handles.
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                commitStampEditing()
+                return true
+            }
+            return false
+        }
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
             commitTextEditing()
             return true
@@ -3170,15 +3807,144 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         return false
     }
 
+    // MARK: Stamp editing
+
+    /// Opens an unrotated text field over the stamp's centre. Keeping the field
+    /// unrotated means a tilted stamp can still be edited after placement.
+    private func beginStampEditing(at index: Int, creationSnapshot: AnnotationSnapshot? = nil) {
+        guard stamps.indices.contains(index) else { return }
+        commitStampEditing()
+
+        let before = creationSnapshot ?? annotationSnapshot()
+        editingStampIndex = index
+        lastObservedEditingStampText = stamps[index].text
+        stampCreationUndoSnapshot = before
+
+        let field = NSTextField(frame: .zero)
+        field.delegate = self
+        field.isBordered = false
+        field.isBezeled = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.usesSingleLineMode = true
+        field.maximumNumberOfLines = 1
+        field.cell?.wraps = false
+        field.cell?.isScrollable = false
+        field.cell?.truncatesLastVisibleLine = true
+        field.alignment = .center
+        field.stringValue = stamps[index].text
+        field.textColor = stamps[index].color.nsColor
+        field.font = stampFont(for: stamps[index], scale: cameraScale)
+        stampEditor = field
+        addSubview(field)
+        positionStampEditor()
+
+        // Field setup can post a spurious end-editing notification. Ignore it
+        // until the field is fully installed and first responder.
+        isPreparingStampEditor = true
+        window?.makeFirstResponder(field)
+        if let editor = field.currentEditor() as? NSTextView {
+            editor.selectedRange = NSRange(
+                location: 0,
+                length: (field.stringValue as NSString).length
+            )
+        }
+        isPreparingStampEditor = false
+        needsDisplay = true
+    }
+
+    private func positionStampEditor() {
+        guard let index = editingStampIndex,
+              stamps.indices.contains(index),
+              let field = stampEditor else { return }
+        let stamp = stamps[index]
+        let center = contentToView(CGPoint(x: stamp.rect.midX, y: stamp.rect.midY))
+        let width = max(StampGeometry.minimumWidth, stamp.rect.width) * cameraScale
+        let height = max(StampGeometry.minimumHeight, stamp.rect.height) * cameraScale
+        field.font = stampFont(for: stamp, scale: cameraScale)
+        field.frame = NSRect(
+            x: center.x - width / 2,
+            y: center.y - height / 2,
+            width: width,
+            height: height
+        )
+    }
+
+    /// Finishes the inline edit and registers one undo step for the whole
+    /// interaction. A blank stamp is discarded rather than exported.
+    func commitStampEditing() {
+        guard let index = editingStampIndex,
+              let field = stampEditor,
+              !isPreparingStampEditor else { return }
+        let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isNewStamp = stampCreationUndoSnapshot.map { $0.stamps.count < stamps.count } ?? false
+
+        if stamps.indices.contains(index) {
+            if text.isEmpty {
+                if isNewStamp {
+                    stamps.remove(at: index)
+                } else {
+                    let beforeRemoval = annotationSnapshot()
+                    stamps.remove(at: index)
+                    registerAnnotationUndo(restoring: beforeRemoval, actionName: "Remove Stamp")
+                }
+                selection = nil
+            } else {
+                stamps[index].text = text
+                if let before = stampCreationUndoSnapshot, before != annotationSnapshot() {
+                    let actionName = isNewStamp ? "Add Stamp" : "Change Stamp Text"
+                    registerAnnotationUndo(restoring: before, actionName: actionName)
+                }
+            }
+        }
+
+        endStampEditing()
+    }
+
+    var isEditingStamp: Bool { editingStampIndex != nil }
+
+    /// Discards the inline edit. A newly created stamp disappears entirely;
+    /// an existing stamp keeps its original wording.
+    func cancelStampEditing() {
+        guard let index = editingStampIndex, !isPreparingStampEditor else { return }
+        if stamps.indices.contains(index), let before = stampCreationUndoSnapshot {
+            if before.stamps.count < stamps.count {
+                stamps.remove(at: index)
+                selection = nil
+            } else if before.stamps.indices.contains(index) {
+                stamps[index].text = before.stamps[index].text
+            }
+        }
+        endStampEditing()
+    }
+
+    private func endStampEditing(makeCanvasFirstResponder: Bool = true) {
+        editingStampIndex = nil
+        lastObservedEditingStampText = ""
+        stampCreationUndoSnapshot = nil
+        stampEditor?.removeFromSuperview()
+        stampEditor = nil
+        if makeCanvasFirstResponder {
+            window?.makeFirstResponder(self)
+        }
+        updateOptionsVisibility()
+        needsDisplay = true
+    }
+
     // MARK: Mouse handling
 
     override func mouseDown(with event: NSEvent) {
-        if ignoreNextMouseDownAfterTextCommit {
+        if ignoreNextMouseDownAfterTextCommit || ignoreNextMouseDownAfterStampCommit {
             ignoreNextMouseDownAfterTextCommit = false
+            ignoreNextMouseDownAfterStampCommit = false
             return
         }
         if editingTextIndex != nil {
             commitTextEditing()
+            return
+        }
+        if editingStampIndex != nil {
+            commitStampEditing()
             return
         }
         if cropSession != nil {
@@ -3197,6 +3963,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
         dragUndoSnapshot = annotationSnapshot()
         didDragAnnotation = false
+        didRotateStamp = false
         if let target = hitTest(at: pointInView) {
             switch target {
             case .arrowStart(let index):
@@ -3279,6 +4046,34 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                         )
                     )
                 }
+            case let .stampCorner(index, corner):
+                let stamp = stamps[index]
+                selectStamp(at: index)
+                dragMode = .resizingStamp(index: index, original: stamp, corner: corner)
+            case .stampRotationHandle(let index):
+                let stamp = stamps[index]
+                selectStamp(at: index)
+                dragMode = .rotatingStamp(
+                    index: index,
+                    original: stamp,
+                    startAngle: stampAngle(at: pointInView, for: stamp),
+                    originalRotation: stamp.rotation
+                )
+            case .stampBody(let index):
+                let stamp = stamps[index]
+                selectStamp(at: index)
+                if event.clickCount >= 2 {
+                    beginStampEditing(at: index)
+                    break
+                }
+                dragMode = .movingStamp(
+                    index: index,
+                    original: stamp,
+                    grabOffset: CGPoint(
+                        x: contentPoint.x - stamp.rect.minX,
+                        y: contentPoint.y - stamp.rect.minY
+                    )
+                )
             }
         } else {
             selection = nil
@@ -3287,6 +4082,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             optionsPanel.updatePencilSelection(color: currentPencilColor, width: currentPencilWidth)
             optionsPanel.updateHighlightSelection(color: currentHighlightColor, width: currentHighlightWidth)
             optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
+            optionsPanel.updateStampSelection(color: currentStampColor)
             updateOptionsVisibility()
             switch activeTool {
             case .some(.arrow):
@@ -3306,6 +4102,9 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 dragMode = nil
                 pointerPosition = nil
                 createTextNote(at: contentPoint)
+            case .some(.stamp):
+                dragMode = .drawingStamp(start: contentPoint)
+                pointerPosition = contentPoint
             case .none:
                 dragMode = nil
             }
@@ -3324,7 +4123,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         guard let point = clampedContentPoint(for: pointInView) else { return }
 
         switch mode {
-        case .drawingArrow, .drawingSquare, .drawingBlur:
+        case .drawingArrow, .drawingSquare, .drawingBlur, .drawingStamp:
             pointerPosition = point
         case .drawingStroke:
             appendStrokePoint(point)
@@ -3419,6 +4218,38 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 x: original.origin.x + dx,
                 y: original.origin.y + dy
             )
+        case let .movingStamp(index, original, grabOffset):
+            guard stamps.indices.contains(index) else { break }
+            let proposedOrigin = CGPoint(
+                x: point.x - grabOffset.x,
+                y: point.y - grabOffset.y
+            )
+            var dx = proposedOrigin.x - original.rect.minX
+            var dy = proposedOrigin.y - original.rect.minY
+
+            let limits = visibleContentRect
+            let bounds = stampBounds(for: original)
+            dx = min(max(dx, limits.minX - bounds.minX), limits.maxX - bounds.maxX)
+            dy = min(max(dy, limits.minY - bounds.minY), limits.maxY - bounds.maxY)
+
+            stamps[index].rect = original.rect.offsetBy(dx: dx, dy: dy)
+        case let .resizingStamp(index, original, corner):
+            guard stamps.indices.contains(index) else { break }
+            let localPoint = stampLocalContentPoint(pointInView, for: original)
+            stamps[index].rect = resizedStampRect(
+                from: original,
+                corner: corner,
+                to: localPoint
+            )
+        case let .rotatingStamp(index, original, startAngle, originalRotation):
+            guard stamps.indices.contains(index) else { break }
+            var delta = (stampAngle(at: pointInView, for: original) - startAngle) * 180 / CGFloat.pi
+            if delta > 180 { delta -= 360 }
+            if delta < -180 { delta += 360 }
+            let rotation = StampGeometry.clampedRotationDegrees(originalRotation + delta)
+            guard rotation != stamps[index].rotation else { break }
+            stamps[index].rotation = rotation
+            didRotateStamp = true
         }
 
         needsDisplay = true
@@ -3487,6 +4318,27 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                     selection = nil
                 }
             }
+        case .drawingStamp(let start):
+            if let end = clampedContentPoint(for: pointInView) {
+                let startInView = contentToView(start)
+                let endInView = contentToView(end)
+                let rect = distance(from: startInView, to: endInView) >= minimumDragDistance
+                    ? normalizedStampRect(from: start, to: end)
+                    : defaultStampRect(centeredAt: start)
+                let beforeCreation = annotationSnapshot()
+                stamps.append(Stamp(
+                    text: "",
+                    rect: rect,
+                    color: currentStampColor
+                ))
+                createdAnnotation = true
+                selection = .stamp(stamps.count - 1)
+                updateOptionsVisibility()
+                beginStampEditing(at: stamps.count - 1, creationSnapshot: beforeCreation)
+                // The inline editor registers the single undo step when the
+                // text is committed, so the drag snapshot must not add another.
+                dragUndoSnapshot = nil
+            }
         case .drawingStroke:
             if drawingStrokePoints.count >= 2,
                polylineLength(drawingStrokePoints) * cameraScale >= minimumDragDistance {
@@ -3511,11 +4363,19 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         pointerPosition = nil
         drawingStrokePoints = []
         if (createdAnnotation || didDragAnnotation), let dragUndoSnapshot {
-            let actionName = createdAnnotation ? "Add Annotation" : "Edit Annotation"
+            let actionName: String
+            if createdAnnotation {
+                actionName = "Add Annotation"
+            } else if didRotateStamp {
+                actionName = "Change Stamp Angle"
+            } else {
+                actionName = "Edit Annotation"
+            }
             registerAnnotationUndo(restoring: dragUndoSnapshot, actionName: actionName)
         }
         dragUndoSnapshot = nil
         didDragAnnotation = false
+        didRotateStamp = false
         updateCursor(at: pointInView)
         needsDisplay = true
     }
@@ -3548,6 +4408,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             cameraCenter.x -= event.scrollingDeltaX / cameraScale
             cameraCenter.y -= event.scrollingDeltaY / cameraScale
             positionTextEditor()
+            positionStampEditor()
             needsDisplay = true
         }
     }
@@ -3568,6 +4429,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             y: anchor.y - (pointInView.y - bounds.midY) / cameraScale
         )
         positionTextEditor()
+        positionStampEditor()
         needsDisplay = true
     }
 
@@ -3617,6 +4479,15 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         // controls, so keep the standard arrow there even with the text tool.
         let overOptions = !optionsPanel.isHidden && optionsPanel.frame.contains(point)
         let overImage = imageRect.contains(point)
+        if !overOptions, let target = hitTest(at: point) {
+            switch target {
+            case .stampRotationHandle, .stampCorner:
+                NSCursor.crosshair.set()
+                return
+            default:
+                break
+            }
+        }
         if activeTool == .text, overImage, !overOptions {
             NSCursor.iBeam.set()
         } else {
@@ -3712,6 +4583,15 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         currentTextColor = note.color
         currentTextBackground = note.background
         optionsPanel.updateTextSelection(color: currentTextColor, background: currentTextBackground)
+        optionsPanel.updateStampSelection(color: currentStampColor)
+        updateOptionsVisibility()
+    }
+
+    private func selectStamp(at index: Int) {
+        guard stamps.indices.contains(index) else { return }
+        selection = .stamp(index)
+        currentStampColor = stamps[index].color
+        optionsPanel.updateStampSelection(color: currentStampColor)
         updateOptionsVisibility()
     }
 
@@ -3898,6 +4778,21 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         window?.makeFirstResponder(self)
     }
 
+    private func applyStampColor(_ color: ArrowColor) {
+        let before = annotationSnapshot()
+        var changedAnnotation = false
+        currentStampColor = color
+        StampPreferences.color = color
+        if case .stamp(let index)? = selection, stamps.indices.contains(index) {
+            stamps[index].color = color
+            changedAnnotation = true
+        }
+        if changedAnnotation {
+            registerAnnotationUndo(restoring: before, actionName: "Change Stamp Color")
+        }
+        needsDisplay = true
+    }
+
     /// The options bar matches the active tool. When no tool is active it
     /// follows the selected annotation instead. Blur has no options, so it
     /// hides the bar.
@@ -3916,6 +4811,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             return .highlight
         case .some(.text):
             return .text
+        case .some(.stamp):
+            return .stamp
         case .none:
             switch selection {
             case .some(.arrow):
@@ -3926,6 +4823,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 return strokes[index].style == .pencil ? .pencil : .highlight
             case .some(.text):
                 return .text
+            case .some(.stamp):
+                return .stamp
             default:
                 return nil
             }
@@ -4000,6 +4899,9 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case .text(let index):
             guard textNotes.indices.contains(index) else { return false }
             textNotes.remove(at: index)
+        case .stamp(let index):
+            guard stamps.indices.contains(index) else { return false }
+            stamps.remove(at: index)
         }
         registerAnnotationUndo(restoring: before, actionName: "Delete Annotation")
         self.selection = nil
@@ -4021,6 +4923,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         if event.keyCode == 53 {
             if editingTextIndex != nil {
                 commitTextEditing()
+                return
+            }
+            if editingStampIndex != nil {
+                cancelStampEditing()
                 return
             }
             if !handleEscape() {
@@ -4087,6 +4993,27 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             // create a new note instead of selecting what lies underneath.
             if activeTool == .text {
                 return nil
+            }
+        }
+
+        // Stamps sit above the other shapes. Like blur, they only capture
+        // clicks when the stamp tool (or no tool) is active so other shapes can
+        // still be drawn over them.
+        if activeTool == nil || activeTool == .stamp {
+            for index in stamps.indices.reversed() {
+                guard case .stamp(let selectedIndex)? = selection, selectedIndex == index else { continue }
+                let stamp = stamps[index]
+                if distance(from: point, to: stampRotationHandlePoint(for: stamp)) <= handleRadius + 5 {
+                    return .stampRotationHandle(index)
+                }
+                for (corner, cornerPoint) in stampRotatedCorners(for: stamp) {
+                    if distance(from: point, to: cornerPoint) <= handleRadius + 3 {
+                        return .stampCorner(index, corner)
+                    }
+                }
+            }
+            for index in stamps.indices.reversed() where stampContains(point, stamp: stamps[index]) {
+                return .stampBody(index)
             }
         }
 
@@ -4239,6 +5166,9 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         for note in textNotes {
             bounds = bounds.union(textBounds(for: note))
         }
+        for stamp in stamps where !stamp.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            bounds = bounds.union(stampBounds(for: stamp))
+        }
         return bounds
     }
 
@@ -4272,6 +5202,13 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 ))
             case .drawingBlur(let start)?:
                 bounds = bounds.union(normalizedRect(from: start, to: pointerPosition))
+            case .drawingStamp(let start)?:
+                bounds = bounds.union(stampBounds(for: Stamp(
+                    text: "",
+                    rect: normalizedStampRect(from: start, to: pointerPosition),
+                    color: currentStampColor,
+                    wearSeed: 0
+                )))
             case .drawingStroke?:
                 if drawingStrokePoints.count >= 2 {
                     let style = drawingStyle
@@ -4416,12 +5353,14 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     func imageWithAnnotations() -> NSImage? {
         commitTextEditing()
+        commitStampEditing()
         guard let image = renderCGImage() else { return nil }
         return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
     }
 
     func pngDataWithAnnotations() -> Data? {
         commitTextEditing()
+        commitStampEditing()
         guard let image = renderCGImage() else { return nil }
         return NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
     }
@@ -4459,6 +5398,9 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             }
             for note in textNotes {
                 exportBounds = exportBounds.union(textBounds(for: note))
+            }
+            for stamp in stamps where !stamp.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                exportBounds = exportBounds.union(stampBounds(for: stamp))
             }
         }
 
@@ -4584,15 +5526,25 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             context.strokePath()
         }
 
-        // Text sits above every shape. The editor works in a flipped (y-down)
-        // space, so flip the export context to reuse the same drawing code.
-        if !textNotes.isEmpty {
+        // Stamps and text sit above every shape. The editor works in a flipped
+        // (y-down) space, so flip the export context to reuse the same code.
+        let exportedStamps = stamps.filter {
+            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if !exportedStamps.isEmpty || !textNotes.isEmpty {
             context.saveGState()
             context.translateBy(x: 0, y: CGFloat(exportHeight))
             context.scaleBy(x: 1, y: -1)
 
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+            for stamp in exportedStamps {
+                drawStamp(
+                    stamp,
+                    transform: { CGPoint(x: $0.x - originX, y: $0.y - originY) },
+                    scale: 1
+                )
+            }
             for note in textNotes {
                 drawTextNote(
                     note,
