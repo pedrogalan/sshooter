@@ -371,6 +371,21 @@ enum StampGeometry {
     }
 }
 
+private enum TextGeometry {
+    static let minimumFontSize: CGFloat = 6
+    static let maximumFontSize: CGFloat = 288
+    static let minimumRotationDegrees: CGFloat = -180
+    static let maximumRotationDegrees: CGFloat = 180
+
+    static func clampedFontSize(_ value: CGFloat) -> CGFloat {
+        min(max(value, minimumFontSize), maximumFontSize)
+    }
+
+    static func clampedRotationDegrees(_ value: CGFloat) -> CGFloat {
+        min(max(value, minimumRotationDegrees), maximumRotationDegrees)
+    }
+}
+
 /// Stable pseudo-randomness for a stamp's worn-ink texture. The seed lives on
 /// the stamp so moving or re-rendering it never makes the defects shimmer.
 private struct StampWearRandom {
@@ -1856,6 +1871,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         var fontSize: CGFloat
         var color: ArrowColor
         var background: TextBackground
+        var rotation: CGFloat = 0
     }
 
     /// A rotated stamp. `rect` is the unrotated frame in image units; `rotation`
@@ -1943,6 +1959,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case resizingSquare(index: Int, original: CGRect, corner: SquareCorner)
         case resizingBlur(index: Int, original: CGRect, corner: SquareCorner)
         case movingText(index: Int, original: TextNote, grabOffset: CGPoint)
+        case resizingText(index: Int, original: TextNote, corner: SquareCorner)
+        case rotatingText(index: Int, original: TextNote, startAngle: CGFloat, originalRotation: CGFloat)
         case movingStamp(index: Int, original: Stamp, grabOffset: CGPoint)
         case resizingStamp(index: Int, original: Stamp, corner: SquareCorner)
         case rotatingStamp(index: Int, original: Stamp, startAngle: CGFloat, originalRotation: CGFloat)
@@ -1958,6 +1976,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         case blurBody(Int)
         case strokeBody(Int)
         case textBody(Int)
+        case textCorner(Int, SquareCorner)
+        case textRotationHandle(Int)
         case stampBody(Int)
         case stampCorner(Int, SquareCorner)
         case stampRotationHandle(Int)
@@ -2011,6 +2031,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var dragUndoSnapshot: AnnotationSnapshot?
     private var didDragAnnotation = false
     private var didRotateStamp = false
+    private var didResizeText = false
+    private var didRotateText = false
     private var trackingArea: NSTrackingArea?
     private let optionsPanel = ArrowOptionsPanel()
     private var blurredScreenshot: CGImage?
@@ -3068,40 +3090,35 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     /// Axis-aligned bounds of the rotated stamp, including its border.
     private func stampBounds(for stamp: Stamp) -> CGRect {
-        let rect = stamp.rect
-        let radians = stamp.rotation * CGFloat.pi / 180
-        let cosine = abs(cos(radians))
-        let sine = abs(sin(radians))
-        let width = rect.width * cosine + rect.height * sine
-        let height = rect.width * sine + rect.height * cosine
-        let padding: CGFloat = 2
-        return CGRect(
-            x: rect.midX - width / 2 - padding,
-            y: rect.midY - height / 2 - padding,
-            width: width + padding * 2,
-            height: height + padding * 2
-        )
+        rotatedBounds(rect: stamp.rect, rotation: stamp.rotation, padding: 2)
     }
 
-    private func stampContains(_ point: CGPoint, stamp: Stamp) -> Bool {
-        let rect = viewRect(for: stamp.rect).insetBy(dx: -4, dy: -4)
-        let center = NSPoint(x: rect.midX, y: rect.midY)
-        let radians = -stamp.rotation * CGFloat.pi / 180
+    // MARK: Rotatable geometry
+
+    /// Shared hit test for rotated stamps and text. The point is unrotated around
+    /// the centre so the existing axis-aligned containment check can be reused.
+    private func rotatedRectContains(
+        _ point: CGPoint,
+        rect: CGRect,
+        rotation: CGFloat,
+        tolerance: CGFloat = 4
+    ) -> Bool {
+        let expanded = rect.insetBy(dx: -tolerance, dy: -tolerance)
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let radians = -rotation * CGFloat.pi / 180
         let dx = point.x - center.x
         let dy = point.y - center.y
-        let local = NSPoint(
+        let local = CGPoint(
             x: center.x + dx * cos(radians) - dy * sin(radians),
             y: center.y + dx * sin(radians) + dy * cos(radians)
         )
-        return rect.contains(local)
+        return expanded.contains(local)
     }
 
-    /// The stamp's own rotated corners, in view coordinates and in the same
-    /// order as `cornerPoints(for:)`.
-    private func stampRotatedCorners(for stamp: Stamp) -> [(SquareCorner, CGPoint)] {
-        let rect = viewRect(for: stamp.rect)
+    /// Corners of a view-space rect after rotation, in `cornerPoints(for:)` order.
+    private func rotatedCorners(rect: CGRect, rotation: CGFloat) -> [(SquareCorner, CGPoint)] {
         let center = CGPoint(x: rect.midX, y: rect.midY)
-        let radians = stamp.rotation * CGFloat.pi / 180
+        let radians = rotation * CGFloat.pi / 180
         let cosine = cos(radians)
         let sine = sin(radians)
 
@@ -3115,14 +3132,11 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         }
     }
 
-    /// A grab point just outside the rotated top-right corner, connected to it
-    /// by a stem. The resize handle stays on the corner itself.
-    private func stampRotationHandlePoint(for stamp: Stamp) -> CGPoint {
-        let rect = viewRect(for: stamp.rect)
+    /// Grab point just outside the rotated top-right corner, connected by a stem.
+    private func rotationHandlePoint(rect: CGRect, rotation: CGFloat) -> CGPoint {
         let center = CGPoint(x: rect.midX, y: rect.midY)
-        guard let corner = stampRotatedCorners(for: stamp).first(where: { $0.0 == .topRight })?.1 else {
-            return center
-        }
+        guard let corner = rotatedCorners(rect: rect, rotation: rotation)
+            .first(where: { $0.0 == .topRight })?.1 else { return center }
         let dx = corner.x - center.x
         let dy = corner.y - center.y
         let length = max(1, hypot(dx, dy))
@@ -3133,12 +3147,15 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         )
     }
 
-    /// Converts a pointer in view coordinates into the stamp's unrotated local
-    /// frame, so the existing axis-aligned resize maths can be reused.
-    private func stampLocalContentPoint(_ pointInView: CGPoint, for stamp: Stamp) -> CGPoint {
-        let rect = viewRect(for: stamp.rect)
+    /// Converts a pointer in view coordinates into the item's unrotated content
+    /// frame, so axis-aligned resize maths can be reused.
+    private func localContentPoint(
+        _ pointInView: CGPoint,
+        rect: CGRect,
+        rotation: CGFloat
+    ) -> CGPoint {
         let center = CGPoint(x: rect.midX, y: rect.midY)
-        let radians = -stamp.rotation * CGFloat.pi / 180
+        let radians = -rotation * CGFloat.pi / 180
         let dx = pointInView.x - center.x
         let dy = pointInView.y - center.y
         let local = CGPoint(
@@ -3148,11 +3165,145 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         return viewToContent(local)
     }
 
-    /// Pointer angle around the stamp centre, used to turn handle drags into
-    /// rotation deltas without depending on where inside the handle it was grabbed.
+    /// Pointer angle around a rect's centre, used to turn handle drags into
+    /// rotation deltas independent of where inside the handle it was grabbed.
+    private func angleAroundRect(_ point: CGPoint, rect: CGRect) -> CGFloat {
+        atan2(point.y - rect.midY, point.x - rect.midX)
+    }
+
+    private func rotatedBounds(
+        rect: CGRect,
+        rotation: CGFloat,
+        padding: CGFloat = 2
+    ) -> CGRect {
+        let radians = rotation * CGFloat.pi / 180
+        let width = rect.width * abs(cos(radians)) + rect.height * abs(sin(radians))
+        let height = rect.width * abs(sin(radians)) + rect.height * abs(cos(radians))
+        return CGRect(
+            x: rect.midX - width / 2 - padding,
+            y: rect.midY - height / 2 - padding,
+            width: width + padding * 2,
+            height: height + padding * 2
+        )
+    }
+
+    private func oppositeCorner(_ corner: SquareCorner) -> SquareCorner {
+        switch corner {
+        case .topLeft: return .bottomRight
+        case .topRight: return .bottomLeft
+        case .bottomLeft: return .topRight
+        case .bottomRight: return .topLeft
+        }
+    }
+
+    // MARK: Stamp geometry
+
+    private func stampContains(_ point: CGPoint, stamp: Stamp) -> Bool {
+        rotatedRectContains(
+            point,
+            rect: viewRect(for: stamp.rect),
+            rotation: stamp.rotation,
+            tolerance: 4
+        )
+    }
+
+    private func stampRotatedCorners(for stamp: Stamp) -> [(SquareCorner, CGPoint)] {
+        rotatedCorners(rect: viewRect(for: stamp.rect), rotation: stamp.rotation)
+    }
+
+    private func stampRotationHandlePoint(for stamp: Stamp) -> CGPoint {
+        rotationHandlePoint(rect: viewRect(for: stamp.rect), rotation: stamp.rotation)
+    }
+
+    private func stampLocalContentPoint(_ pointInView: CGPoint, for stamp: Stamp) -> CGPoint {
+        localContentPoint(pointInView, rect: viewRect(for: stamp.rect), rotation: stamp.rotation)
+    }
+
     private func stampAngle(at point: CGPoint, for stamp: Stamp) -> CGFloat {
-        let rect = viewRect(for: stamp.rect)
-        return atan2(point.y - rect.midY, point.x - rect.midX)
+        angleAroundRect(point, rect: viewRect(for: stamp.rect))
+    }
+
+    // MARK: Text geometry
+
+    private func textContains(_ point: CGPoint, note: TextNote) -> Bool {
+        rotatedRectContains(
+            point,
+            rect: viewRect(for: textBackgroundRect(for: note)),
+            rotation: note.rotation,
+            tolerance: 3
+        )
+    }
+
+    private func textRotatedCorners(for note: TextNote) -> [(SquareCorner, CGPoint)] {
+        rotatedCorners(rect: viewRect(for: textBackgroundRect(for: note)), rotation: note.rotation)
+    }
+
+    private func textRotationHandlePoint(for note: TextNote) -> CGPoint {
+        rotationHandlePoint(
+            rect: viewRect(for: textBackgroundRect(for: note)),
+            rotation: note.rotation
+        )
+    }
+
+    private func textLocalContentPoint(_ pointInView: CGPoint, for note: TextNote) -> CGPoint {
+        localContentPoint(
+            pointInView,
+            rect: viewRect(for: textBackgroundRect(for: note)),
+            rotation: note.rotation
+        )
+    }
+
+    private func textAngle(at point: CGPoint, for note: TextNote) -> CGFloat {
+        angleAroundRect(point, rect: viewRect(for: textBackgroundRect(for: note)))
+    }
+
+    /// Scales the font from a corner drag and pins the opposite corner of the
+    /// background pill. Text has one size value, so the scale is uniform.
+    private func resizedTextNote(
+        from original: TextNote,
+        corner: SquareCorner,
+        to point: CGPoint
+    ) -> TextNote {
+        let background = textBackgroundRect(for: original)
+        let points = Dictionary(uniqueKeysWithValues: cornerPoints(for: background))
+        guard let dragged = points[corner], let fixed = points[oppositeCorner(corner)] else {
+            return original
+        }
+        let originalDiagonal = distance(from: fixed, to: dragged)
+        let newDiagonal = distance(from: fixed, to: point)
+        guard originalDiagonal > 0, original.fontSize > 0 else { return original }
+
+        let scale = newDiagonal / originalDiagonal
+        let fontSize = TextGeometry.clampedFontSize(original.fontSize * scale)
+        let actualScale = fontSize / original.fontSize
+        let newSize = CGSize(
+            width: background.width * actualScale,
+            height: background.height * actualScale
+        )
+
+        let newBackgroundOrigin: CGPoint
+        switch corner {
+        case .topLeft:
+            newBackgroundOrigin = CGPoint(
+                x: fixed.x - newSize.width,
+                y: fixed.y - newSize.height
+            )
+        case .topRight:
+            newBackgroundOrigin = CGPoint(x: fixed.x, y: fixed.y - newSize.height)
+        case .bottomLeft:
+            newBackgroundOrigin = CGPoint(x: fixed.x - newSize.width, y: fixed.y)
+        case .bottomRight:
+            newBackgroundOrigin = fixed
+        }
+
+        let padding = fontSize * 0.45
+        var result = original
+        result.fontSize = fontSize
+        result.origin = CGPoint(
+            x: newBackgroundOrigin.x + padding,
+            y: newBackgroundOrigin.y + padding
+        )
+        return result
     }
 
     private func drawBlur(_ region: BlurRegion) {
@@ -3370,15 +3521,21 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         }
     }
 
-    private func drawHandles(for stamp: Stamp) {
-        let bounds = viewRect(for: stampBounds(for: stamp))
+    /// Shared selection chrome for stamps and text: dashed rotated outline,
+    /// four corner knobs, and a circular rotation handle.
+    private func drawRotatableHandles(
+        rect: CGRect,
+        rotation: CGFloat,
+        boundsPadding: CGFloat = 2
+    ) {
+        let bounds = rotatedBounds(rect: rect, rotation: rotation, padding: boundsPadding)
         let outline = NSBezierPath(rect: bounds.insetBy(dx: -2, dy: -2))
         outline.setLineDash([4, 3], count: 2, phase: 0)
         NSColor.controlAccentColor.withAlphaComponent(0.9).setStroke()
         outline.lineWidth = 1
         outline.stroke()
 
-        let corners = stampRotatedCorners(for: stamp)
+        let corners = rotatedCorners(rect: rect, rotation: rotation)
         for (_, point) in corners {
             let rect = NSRect(
                 x: point.x - handleRadius,
@@ -3395,7 +3552,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         }
 
         guard let topRight = corners.first(where: { $0.0 == .topRight })?.1 else { return }
-        let handle = stampRotationHandlePoint(for: stamp)
+        let handle = rotationHandlePoint(rect: rect, rotation: rotation)
 
         let stem = NSBezierPath()
         stem.move(to: topRight)
@@ -3429,13 +3586,15 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         arc.stroke()
     }
 
+    private func drawHandles(for stamp: Stamp) {
+        drawRotatableHandles(rect: viewRect(for: stamp.rect), rotation: stamp.rotation)
+    }
+
     private func drawHandles(for note: TextNote) {
-        let background = viewRect(for: textBackgroundRect(for: note))
-        let outline = NSBezierPath(rect: background.insetBy(dx: -2, dy: -2))
-        outline.setLineDash([4, 3], count: 2, phase: 0)
-        NSColor.controlAccentColor.withAlphaComponent(0.9).setStroke()
-        outline.lineWidth = 1
-        outline.stroke()
+        drawRotatableHandles(
+            rect: viewRect(for: textBackgroundRect(for: note)),
+            rotation: note.rotation
+        )
     }
 
     private func drawHandles(for stroke: FreehandStroke) {
@@ -3498,19 +3657,70 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         )
     }
 
+    /// Draws a text note into a small transparent bitmap so its pill and glyphs
+    /// rotate together without disturbing the screenshot underneath.
     private func drawTextNote(
         _ note: TextNote,
         transform: (CGPoint) -> CGPoint,
         scale: CGFloat
     ) {
         guard !note.text.isEmpty else { return }
+        guard let mainContext = NSGraphicsContext.current?.cgContext else { return }
+
+        let rect = transformedRect(
+            textBackgroundRect(for: note),
+            transform: transform,
+            scale: scale
+        )
+        let radians = note.rotation * CGFloat.pi / 180
+        let rotatedWidth = rect.width * abs(cos(radians)) + rect.height * abs(sin(radians))
+        let rotatedHeight = rect.width * abs(sin(radians)) + rect.height * abs(cos(radians))
+        let padding: CGFloat = 8
+        let drawingRect = CGRect(
+            x: rect.midX - rotatedWidth / 2 - padding,
+            y: rect.midY - rotatedHeight / 2 - padding,
+            width: rotatedWidth + padding * 2,
+            height: rotatedHeight + padding * 2
+        )
+
+        guard let bitmapContext = CGContext(
+            data: nil,
+            width: max(1, Int(drawingRect.width.rounded(.up))),
+            height: max(1, Int(drawingRect.height.rounded(.up))),
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            drawTextNoteArtwork(note, rect: rect, scale: scale, in: mainContext)
+            return
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: bitmapContext, flipped: true)
+        bitmapContext.translateBy(x: -drawingRect.origin.x, y: -drawingRect.origin.y)
+        drawTextNoteArtwork(note, rect: rect, scale: scale, in: bitmapContext)
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let image = bitmapContext.makeImage() else { return }
+        mainContext.draw(image, in: drawingRect)
+    }
+
+    private func drawTextNoteArtwork(
+        _ note: TextNote,
+        rect: CGRect,
+        scale: CGFloat,
+        in context: CGContext
+    ) {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        context.saveGState()
+        var rotation = CGAffineTransform.identity
+        rotation = rotation.translatedBy(x: center.x, y: center.y)
+        rotation = rotation.rotated(by: note.rotation * CGFloat.pi / 180)
+        rotation = rotation.translatedBy(x: -center.x, y: -center.y)
+        context.concatenate(rotation)
 
         if let background = note.background.nsColor {
-            let rect = transformedRect(
-                textBackgroundRect(for: note),
-                transform: transform,
-                scale: scale
-            )
             let radius = max(1, note.fontSize * 0.12 * scale)
             let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
             background.setFill()
@@ -3523,10 +3733,14 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             .foregroundColor: note.color.nsColor
         ]
         let size = textSize(for: note.text, font: font)
-        let origin = transform(note.origin)
+        let origin = CGPoint(
+            x: rect.midX - size.width / 2,
+            y: rect.midY - size.height / 2
+        )
         NSAttributedString(string: note.text, attributes: attributes).draw(
             in: CGRect(origin: origin, size: size)
         )
+        context.restoreGState()
     }
 
     /// Measures explicit newlines as separate lines while preserving the
@@ -3561,7 +3775,11 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     private func textBounds(for note: TextNote) -> CGRect {
-        textBackgroundRect(for: note).insetBy(dx: -2, dy: -2)
+        rotatedBounds(
+            rect: textBackgroundRect(for: note),
+            rotation: note.rotation,
+            padding: 2
+        )
     }
 
     // MARK: Text editing
@@ -3571,7 +3789,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         let note = TextNote(
             origin: point,
             text: "",
-            fontSize: baseTextFontSize() * currentTextScale,
+            fontSize: TextGeometry.clampedFontSize(baseTextFontSize() * currentTextScale),
             color: currentTextColor,
             background: currentTextBackground
         )
@@ -3642,11 +3860,15 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             with: NSSize(width: max(fieldWidth - 22, 1), height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         )
+        // Keep the editor horizontal and centred on the (possibly rotated)
+        // note, so a rotated label can still be edited comfortably.
+        let background = viewRect(for: textBackgroundRect(for: note))
+        let fieldHeight = max(ceil(textLayout.height) + 8, lineHeight)
         field.frame = NSRect(
-            x: contentToView(note.origin).x,
-            y: contentToView(note.origin).y,
+            x: background.midX - fieldWidth / 2,
+            y: background.midY - fieldHeight / 2,
             width: fieldWidth,
-            height: max(ceil(textLayout.height) + 8, lineHeight)
+            height: fieldHeight
         )
     }
 
@@ -3964,6 +4186,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         dragUndoSnapshot = annotationSnapshot()
         didDragAnnotation = false
         didRotateStamp = false
+        didResizeText = false
+        didRotateText = false
         if let target = hitTest(at: pointInView) {
             switch target {
             case .arrowStart(let index):
@@ -4030,6 +4254,19 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                         x: contentPoint.x - first.x,
                         y: contentPoint.y - first.y
                     )
+                )
+            case let .textCorner(index, corner):
+                let note = textNotes[index]
+                selectText(at: index)
+                dragMode = .resizingText(index: index, original: note, corner: corner)
+            case .textRotationHandle(let index):
+                let note = textNotes[index]
+                selectText(at: index)
+                dragMode = .rotatingText(
+                    index: index,
+                    original: note,
+                    startAngle: textAngle(at: pointInView, for: note),
+                    originalRotation: note.rotation
                 )
             case .textBody(let index):
                 selectText(at: index)
@@ -4218,6 +4455,20 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 x: original.origin.x + dx,
                 y: original.origin.y + dy
             )
+        case let .resizingText(index, original, corner):
+            guard textNotes.indices.contains(index) else { break }
+            let localPoint = textLocalContentPoint(pointInView, for: original)
+            textNotes[index] = resizedTextNote(from: original, corner: corner, to: localPoint)
+            didResizeText = true
+        case let .rotatingText(index, original, startAngle, originalRotation):
+            guard textNotes.indices.contains(index) else { break }
+            var delta = (textAngle(at: pointInView, for: original) - startAngle) * 180 / CGFloat.pi
+            if delta > 180 { delta -= 360 }
+            if delta < -180 { delta += 360 }
+            let rotation = TextGeometry.clampedRotationDegrees(originalRotation + delta)
+            guard rotation != textNotes[index].rotation else { break }
+            textNotes[index].rotation = rotation
+            didRotateText = true
         case let .movingStamp(index, original, grabOffset):
             guard stamps.indices.contains(index) else { break }
             let proposedOrigin = CGPoint(
@@ -4368,6 +4619,10 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 actionName = "Add Annotation"
             } else if didRotateStamp {
                 actionName = "Change Stamp Angle"
+            } else if didRotateText {
+                actionName = "Change Text Angle"
+            } else if didResizeText {
+                actionName = "Resize Text"
             } else {
                 actionName = "Edit Annotation"
             }
@@ -4376,6 +4631,8 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         dragUndoSnapshot = nil
         didDragAnnotation = false
         didRotateStamp = false
+        didResizeText = false
+        didRotateText = false
         updateCursor(at: pointInView)
         needsDisplay = true
     }
@@ -4481,7 +4738,7 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         let overImage = imageRect.contains(point)
         if !overOptions, let target = hitTest(at: point) {
             switch target {
-            case .stampRotationHandle, .stampCorner:
+            case .stampRotationHandle, .stampCorner, .textRotationHandle, .textCorner:
                 NSCursor.crosshair.set()
                 return
             default:
@@ -4763,13 +5020,18 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private func adjustTextSize(increase: Bool) {
         let before = annotationSnapshot()
         var changedAnnotation = false
+        let factor: CGFloat = increase ? 1.15 : 1 / 1.15
         currentTextScale = min(
-            max(currentTextScale * (increase ? 1.15 : 1 / 1.15), TextPreferences.minimumScale),
+            max(currentTextScale * factor, TextPreferences.minimumScale),
             TextPreferences.maximumScale
         )
         TextPreferences.scale = currentTextScale
         if case .text(let index)? = selection, textNotes.indices.contains(index) {
-            textNotes[index].fontSize = baseTextFontSize() * currentTextScale
+            // Scale the selected label from its own size; corner drags may have
+            // set it independently of the toolbar's global scale.
+            textNotes[index].fontSize = TextGeometry.clampedFontSize(
+                textNotes[index].fontSize * factor
+            )
             changedAnnotation = true
             positionTextEditor()
         }
@@ -4982,9 +5244,22 @@ private final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         // captures clicks when no tool is active or the text tool is chosen, so
         // shapes can still be drawn over a note.
         if activeTool == nil || activeTool == .text {
+            // Handles of the selected note take priority over its body and over
+            // clicking empty space with the text tool.
             for index in textNotes.indices.reversed() where index != editingTextIndex {
-                let background = viewRect(for: textBackgroundRect(for: textNotes[index]))
-                if background.insetBy(dx: -3, dy: -3).contains(point) {
+                guard case .text(let selectedIndex)? = selection, selectedIndex == index else { continue }
+                let note = textNotes[index]
+                if distance(from: point, to: textRotationHandlePoint(for: note)) <= handleRadius + 5 {
+                    return .textRotationHandle(index)
+                }
+                for (corner, cornerPoint) in textRotatedCorners(for: note) {
+                    if distance(from: point, to: cornerPoint) <= handleRadius + 3 {
+                        return .textCorner(index, corner)
+                    }
+                }
+            }
+            for index in textNotes.indices.reversed() where index != editingTextIndex {
+                if textContains(point, note: textNotes[index]) {
                     return .textBody(index)
                 }
             }
