@@ -98,25 +98,37 @@ final class CaptureModel {
 
     func beginRegionCapture() {
         guard !isCapturing else { return }
+        isCapturing = true
 
+        // Do this inside the menu item's user gesture. Deferring it to the
+        // overlay would let macOS refuse activation, leaving the overlay
+        // visible but not key so the first click only activates the app.
+        NSApp.activate(ignoringOtherApps: true)
+
+        // A status-menu action runs while the menu is still dismissing. Wait for
+        // the next turn of the run loop so the first click after the overlay
+        // appears is delivered to it instead of being swallowed by the menu.
+        Task { [weak self] in
+            guard let self else { return }
+            await self.startRegionCapture()
+        }
+    }
+
+    private func startRegionCapture() async {
         guard let screen = screenUnderPointer(),
               let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            isCapturing = false
             showError(CaptureError.noDisplay)
             return
         }
 
-        isCapturing = true
         let displayID = CGDirectDisplayID(screenNumber.uint32Value)
-
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                let image = try await ScreenCapture.captureDisplay(id: displayID)
-                self.presentOverlay(on: screen, image: image)
-            } catch {
-                self.isCapturing = false
-                self.showError(error)
-            }
+        do {
+            let image = try await ScreenCapture.captureDisplay(id: displayID)
+            presentOverlay(on: screen, image: image)
+        } catch {
+            isCapturing = false
+            showError(error)
         }
     }
 
@@ -166,6 +178,11 @@ final class CaptureModel {
     private func cancelCapture() {
         dismissOverlay()
         isCapturing = false
+        // Forcing activation was needed to make the overlay key. Hand focus
+        // back when there is no editor to return to.
+        if editorWindow?.isVisible != true {
+            NSApp.deactivate()
+        }
     }
 
     private func dismissOverlay() {
@@ -330,10 +347,11 @@ private final class RegionCaptureWindow: NSWindow {
     }
 
     func show() {
-        NSApp.activate()
+        NSApp.activate(ignoringOtherApps: true)
         makeKeyAndOrderFront(nil)
         orderFrontRegardless()
         if let selectionView {
+            makeFirstResponder(selectionView)
             invalidateCursorRects(for: selectionView)
         }
         NSCursor.crosshair.set()
