@@ -17,14 +17,22 @@ final class ScreenshotStore {
         self.fileManager = fileManager
     }
 
-    var saveFolderURL: URL? {
+    /// The folder the user chose, even if it is temporarily unavailable (for
+    /// example while a cloud folder is still mounting after login).
+    var configuredSaveFolderURL: URL? {
         guard let path = defaults.string(forKey: DefaultsKey.saveFolderPath) else { return nil }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    /// The configured folder only while it is usable for writing.
+    var saveFolderURL: URL? {
+        guard let url = configuredSaveFolderURL else { return nil }
         var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory),
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory),
               isDirectory.boolValue else {
             return nil
         }
-        return URL(fileURLWithPath: path, isDirectory: true)
+        return url
     }
 
     var autoSaveCaptures: Bool {

@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
@@ -6,6 +7,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     private let onClose: @MainActor () -> Void
     private let folderValue = NSTextField(labelWithString: "")
+    private let launchAtLoginCheckbox = NSButton(checkboxWithTitle: "Launch at login", target: nil, action: nil)
     private let autoSaveCheckbox = NSButton(checkboxWithTitle: "Save captures automatically", target: nil, action: nil)
     private let warningLabel = NSTextField(wrappingLabelWithString: "")
     private var statusLabels: [Permission: NSTextField] = [:]
@@ -108,6 +110,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         folderRow.spacing = 8
         folderRow.translatesAutoresizingMaskIntoConstraints = false
 
+        launchAtLoginCheckbox.target = self
+        launchAtLoginCheckbox.action = #selector(launchAtLoginChanged(_:))
+        launchAtLoginCheckbox.toolTip = "Start sShooter when you log in. If macOS needs approval, enable it in System Settings → General → Login Items & Extensions."
+        let launchRow = NSStackView(views: [launchAtLoginCheckbox])
+        launchRow.orientation = .horizontal
+
         autoSaveCheckbox.target = self
         autoSaveCheckbox.action = #selector(autoSaveChanged(_:))
 
@@ -132,7 +140,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         hint.textColor = .secondaryLabelColor
         hint.preferredMaxLayoutWidth = 430
 
-        let stack = NSStackView(views: [folderRow, autoSaveRow, hint])
+        let stack = NSStackView(views: [folderRow, launchRow, autoSaveRow, hint])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 14
@@ -288,7 +296,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - Values
 
     private func refreshValues() {
-        if let folder = ScreenshotStore.shared.saveFolderURL {
+        if let folder = ScreenshotStore.shared.configuredSaveFolderURL {
             let home = FileManager.default.homeDirectoryForCurrentUser.path
             if folder.path == home {
                 folderValue.stringValue = "~"
@@ -301,6 +309,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             folderValue.stringValue = "No folder selected"
         }
         autoSaveCheckbox.state = ScreenshotStore.shared.autoSaveCaptures ? .on : .off
+        launchAtLoginCheckbox.state = loginAtLoginIsEnabled ? .on : .off
+    }
+
+    private var loginAtLoginIsEnabled: Bool {
+        let status = SMAppService.mainApp.status
+        return status == .enabled || status == .requiresApproval
     }
 
     @objc private func refreshPermissions() {
@@ -325,6 +339,35 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     @objc private func chooseSaveFolder(_ sender: Any?) {
         _ = ScreenshotStore.shared.chooseSaveFolder()
         refreshValues()
+    }
+
+    @objc private func launchAtLoginChanged(_ sender: NSButton) {
+        do {
+            if sender.state == .on {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            sender.state = loginAtLoginIsEnabled ? .on : .off
+            let alert = NSAlert()
+            alert.messageText = "Couldn’t change the launch setting"
+            alert.informativeText = "macOS couldn’t update Launch at login. \(error.localizedDescription)"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+
+        refreshValues()
+        if SMAppService.mainApp.status == .requiresApproval {
+            let alert = NSAlert()
+            alert.messageText = "Approval needed"
+            alert.informativeText = "Enable sShooter in System Settings → General → Login Items & Extensions to finish turning on Launch at login."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
     }
 
     @objc private func autoSaveChanged(_ sender: NSButton) {

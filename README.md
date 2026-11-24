@@ -52,7 +52,7 @@ While the annotation window is open, sShooter temporarily behaves like a regular
 
 Open **Settings** from the camera menu. It has three tabs:
 
-- **General** — choose the screenshot folder and optionally save each capture automatically.
+- **General** — choose the screenshot folder, optionally save each capture automatically, and turn on **Launch at login** if you want sShooter to start when you log in.
 - **Permissions** — shows the Screen Recording status and links to the relevant System Settings pane.
 - **About** — version, project link, and license.
 
@@ -64,7 +64,7 @@ sShooter needs Screen Recording to capture the screen. The first capture asks fo
 
 ## Uninstall
 
-Quit sShooter from the camera menu in the menu bar, then remove `sShooter.app` from your Applications folder.
+Turn off **Launch at login** in Settings, quit sShooter from the camera menu in the menu bar, then remove `sShooter.app` from your Applications folder.
 
 ## License
 
